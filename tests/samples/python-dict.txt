@@ -1,0 +1,7 @@
+{'user': {'id': 42, 'name': "O'Brien", 'active': True, 'manager': None, 'roles': ('admin', 'dev'), 'tags': {'a', 'b'}},
+ 'balance': Decimal('1234.50'),
+ 'created': datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc),
+ 'request_id': UUID('12345678-1234-5678-1234-567812345678'),
+ 'meta': OrderedDict([('page', 1), ('per_page', 50)]),
+ 'handler': <function handle at 0x7f3a2c1d>,
+ 3: 'int key'}

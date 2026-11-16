@@ -1,0 +1,1 @@
+2026-11-16 12:00:01,123 INFO payments.api request_id=ab12 payload={"order_id": 12345678901234567890, "items": [{"sku": "A1", "qty": 2}], "note": "{\"inner\": true}"} status=200 elapsed=35ms

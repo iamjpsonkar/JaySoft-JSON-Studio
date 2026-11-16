@@ -1,0 +1,1 @@
+{ id: 7, "name" => "Ann", :admin => true, tags: ["a", "b"], profile: { age: nil } }

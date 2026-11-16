@@ -1,0 +1,3 @@
+{"ts": 1, "level": "info", "msg": "start"}
+{"ts": 2, "level": "warn", "msg": "slow"}
+{"ts": 3, "level": "error", "msg": "boom"}
