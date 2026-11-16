@@ -55,15 +55,21 @@
 
   // ------------------------------------------------------------------ prefs
   const prefs = {
-    theme: 'auto', mode: 'viewer', indent: '2', outStyle: 'auto', sort: false, tab: 'tree', depth: 2, ctab: 'tree',
+    theme: 'auto', mode: 'viewer', layout: 2, indent: '2', outStyle: 'auto', sort: false, depth: 2, ctab: 'tree',
+    panes: { a: { view: 'raw', picked: false }, b: { view: 'raw', picked: false } },
     cmp: { order: true, array: 'index', arrayKey: 'id', ignore: '', tol: 0, caseI: false, trim: false, missing: false, collapse: true },
   };
   function loadPrefs() {
     try {
       const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
-      Object.assign(prefs, p, { cmp: Object.assign(prefs.cmp, p.cmp || {}) });
+      Object.assign(prefs, p, {
+        cmp: Object.assign(prefs.cmp, p.cmp || {}),
+        panes: { a: Object.assign(prefs.panes.a, (p.panes || {}).a), b: Object.assign(prefs.panes.b, (p.panes || {}).b) },
+      });
     } catch (err) { log('warn', 'prefs-load-failed', { error: String(err) }); }
     if (!['viewer', 'compare'].includes(prefs.mode)) prefs.mode = 'viewer';
+    prefs.layout = Number(prefs.layout) === 1 ? 1 : 2;
+    for (const side of ['a', 'b']) if (!['raw', 'preview', 'tree'].includes(prefs.panes[side].view)) prefs.panes[side].view = 'raw';
   }
   const savePrefs = () => {
     try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (err) { log('warn', 'prefs-save-failed', { error: String(err) }); }
@@ -168,116 +174,29 @@
     return box;
   }
 
-  // ====================================================================== VIEWER
-  const el = {
-    vInput: $('vInput'), vInfo: $('vInfo'), vName: $('vName'), vTree: $('vTree'), vMeta: $('vMeta'),
-    vSearch: $('vSearch'), vSearchCount: $('vSearchCount'), vFilter: $('vFilter'), vQuery: $('vQuery'), vQueryBox: $('vQueryBox'),
-    vFormatted: $('vFormatted'), vFormattedBox: $('vFormattedBox'), fNote: $('fNote'), vEmbedded: $('vEmbedded'),
-  };
-  const V = {
-    text: '', res: null, seq: 0, pick: undefined, tab: 'tree', depth: 2, expanded: new Set(), collapsed: new Set(), limits: new Map(),
-    term: '', matches: [], matchKeys: new Set(), visible: new Set(), idx: -1, curKey: null, filter: false,
-    handle: null, name: 'Untitled', mtime: 0, dirty: false, embedded: 0, nodes: 0, query: null, repairInfo: null, fmtText: '',
-  };
-  const rowInfo = new WeakMap();
-  const rowEls = new Map();
-
-  const outputStyle = () => {
-    if (prefs.outStyle !== 'auto') return prefs.outStyle;
-    const f = V.res && V.res.format;
-    return f === 'python' ? 'python' : f === 'javascript' || f === 'json5' ? 'js' : 'json';
-  };
-  const indentOpt = () => (prefs.indent === 'tab' ? 'tab' : Number(prefs.indent));
-  const formattedOut = () => serialize(V.res.node, { style: outputStyle(), indent: indentOpt(), sortKeys: prefs.sort, nonFinite: 'keep' });
-
-  async function reloadViewer(opts) {
-    opts = opts || {};
-    const text = el.vInput.value;
-    V.text = text;
-    const seq = ++V.seq;
-    if (!text.trim()) {
-      V.res = null; V.nodes = 0; V.embedded = 0;
-      resetView();
-      renderViewer();
-      return;
+  // ====================================================================== preview highlighting
+  const HIGHLIGHT_MAX = 600000;
+  const PREVIEW_MAX = 2000000;
+  const TOKEN_RE = /("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')(\s*:)?|\b(?:true|false|null|True|False|None|undefined)\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b|NaN|-?Infinity/g;
+  /** Colours tokens with spans built from text nodes (never innerHTML). Plain text beyond HIGHLIGHT_MAX. */
+  function highlightInto(pre, text) {
+    pre.replaceChildren();
+    if (text.length > HIGHLIGHT_MAX) { pre.textContent = text.length > PREVIEW_MAX ? `${text.slice(0, PREVIEW_MAX)}\n… truncated in this view. Copy, Download and Save formatted give the full text.` : text; return; }
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    TOKEN_RE.lastIndex = 0;
+    while ((m = TOKEN_RE.exec(text))) {
+      if (m.index > last) frag.append(text.slice(last, m.index));
+      const cls = m[1] ? (m[2] ? 'p-key' : 'p-str') : /^-?\d|Infinity|NaN/.test(m[0]) ? 'p-num' : 'p-kw';
+      frag.append(h('span', { class: cls, text: m[1] || m[0] }));
+      if (m[2]) frag.append(m[2]);
+      last = TOKEN_RE.lastIndex;
     }
-    setStatus('Parsing…');
-    const res = await loadText(text, { pick: V.pick });
-    if (seq !== V.seq) { log('debug', 'viewer-stale-result-dropped', { seq }); return; }
-    setStatus('');
-    V.res = res;
-    V.nodes = res.ok ? countNodes(res.node) : 0;
-    V.embedded = res.ok && text.length < 3000000 ? JSS.loader.findEmbedded(res.node, 200).length : 0;
-    if (!opts.keepView) resetView();
-    else if (V.term) runSearch(true);
-    $('stLeft').textContent = res.ok ? `${res.label} · parsed in ${res.ms} ms` : 'Parse error';
-    renderViewer();
-  }
-  const scheduleReload = debounce(() => reloadViewer(), 250);
-
-  function resetView() {
-    V.expanded.clear(); V.collapsed.clear(); V.limits.clear(); V.curKey = null; V.idx = -1;
-    V.query = null;
-    runSearch(true);
+    if (last < text.length) frag.append(text.slice(last));
+    pre.append(frag);
   }
 
-  function renderViewer() {
-    el.vInfo.replaceChildren();
-    if (V.repairInfo) {
-      el.vInfo.append(h('div', { class: 'info' }, h('div', { class: 'note-repair' },
-        h('strong', { text: 'Repaired: ' }), V.repairInfo.changes.join('; '), ' ',
-        h('button', { class: 'tb', text: 'Undo', onclick: undoRepair }))));
-    }
-    if (V.res) {
-      el.vInfo.append(resultInfo(V.res, {
-        goTo: (pos) => { el.vInput.focus(); el.vInput.setSelectionRange(pos, pos); const line = el.vInput.value.slice(0, pos).split('\n').length; el.vInput.scrollTop = Math.max(0, (line - 4) * 20.8); },
-        repair: doRepair,
-        pick: (i) => { V.pick = i; reloadViewer(); },
-      }));
-    }
-    el.vName.textContent = V.name + (V.dirty && V.handle ? ' ●' : '');
-    $('vTabs').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === V.tab));
-    $('vTree').hidden = V.tab !== 'tree';
-    el.vFormattedBox.hidden = V.tab !== 'formatted';
-    el.vQueryBox.hidden = V.tab !== 'query';
-    const ok = Boolean(V.res && V.res.ok);
-    el.vMeta.textContent = ok ? `${plural(V.nodes, 'node')} · ${fmtBytes(V.text.length)}` : '';
-    el.vEmbedded.hidden = !ok || V.embedded === 0;
-    el.vEmbedded.textContent = `Expand embedded JSON (${V.embedded}${V.embedded >= 200 ? '+' : ''})`;
-    $('vApply').disabled = !ok;
-    $('vBar').querySelectorAll('button,input,select').forEach((c) => { if (c !== el.vEmbedded) c.disabled = !ok; });
-    $('btnSave').disabled = !V.text;
-    $('btnSaveAs').disabled = !V.text;
-    if (V.tab === 'tree') renderTree();
-    else if (V.tab === 'formatted') renderFormatted();
-    else renderQuery();
-  }
-
-  function setTab(tab) {
-    V.tab = tab;
-    prefs.tab = tab;
-    savePrefs();
-    renderViewer();
-  }
-
-  // ---- repair
-  function doRepair() {
-    const r = JSS.loader.repair(el.vInput.value);
-    if (!r) return toast('No automatic repair is possible for this input.', 'error');
-    V.repairInfo = { before: el.vInput.value, changes: r.changes };
-    el.vInput.value = r.text;
-    log('info', 'repair-applied', { changes: r.changes.length });
-    reloadViewer();
-  }
-  function undoRepair() {
-    if (!V.repairInfo) return;
-    el.vInput.value = V.repairInfo.before;
-    V.repairInfo = null;
-    reloadViewer();
-  }
-
-  // ---- tree
-  const isOpen = (pk, depth) => (V.collapsed.has(pk) ? false : V.expanded.has(pk) ? true : depth < V.depth);
+  // ====================================================================== DOCUMENT PANE (two instances: A and B)
   const trunc = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
   function valueSpan(n, open) {
@@ -304,337 +223,536 @@
     return out;
   }
 
-  function renderNode(parent, node, path, kinfo, depth, ctx) {
-    if (ctx.budget <= 0) { ctx.over = true; return; }
-    const pk = pathKey(path);
-    if (V.filter && V.term && !V.visible.has(pk)) return;
-    ctx.budget--;
-    const container = node.t === 'obj' || node.t === 'arr';
-    const open = container && isOpen(pk, depth);
-    const row = h('div', { class: 'row', style: `padding-left:${8 + depth * 16}px` });
-    row.dataset.pk = pk;
-    if (V.matchKeys.has(pk)) row.classList.add('match');
-    if (V.curKey === pk) row.classList.add('current');
-    row.append(h('span', { class: `caret${container ? '' : ' leaf'}`, text: container ? (open ? '▾' : '▸') : '' }));
-    if (kinfo) {
-      const label = kinfo.idx ? String(kinfo.text) : (kinfo.keyType === 'num' || kinfo.keyType === 'tuple' ? kinfo.text : JSON.stringify(trunc(kinfo.text, 120)));
-      row.append(h('span', { class: `k${kinfo.idx ? ' idx' : ''}`, text: label }), h('span', { class: 'colon', text: ':' }));
-    }
-    row.append(valueSpan(node, open), ...badges(node));
-    row.append(h('span', { class: 'acts' },
-      h('button', { 'data-act': 'path', title: 'Copy path', text: 'path' }),
-      h('button', { 'data-act': 'copy', title: container ? 'Copy this subtree as JSON' : 'Copy value', text: 'copy' })));
-    parent.append(row);
-    rowInfo.set(row, { node, path });
-    rowEls.set(pk, row);
-    if (open) renderChildren(parent, node, path, depth + 1, ctx, pk);
-  }
+  const panes = {};
+  let activePane = null;
 
-  function renderChildren(parent, node, path, depth, ctx, pk) {
-    const list = children(node);
-    const limit = V.limits.get(pk) || 200;
-    const filtering = V.filter && V.term;
-    let shown = 0, i = 0;
-    for (; i < list.length; i++) {
-      if (!filtering && shown >= limit) break;
-      const [k, v] = list[i];
-      const before = ctx.budget;
-      renderNode(parent, v, path.concat(k), {
-        text: k, idx: node.t === 'arr', keyType: node.t === 'obj' ? node.entries[i].keyType : undefined,
-      }, depth, ctx);
-      if (ctx.budget !== before) shown++;
-      if (ctx.budget <= 0) return;
-    }
-    if (!filtering && i < list.length) {
-      const more = h('div', { class: 'more-row', style: `padding-left:${8 + depth * 16 + 18}px`, text: `… ${(list.length - i).toLocaleString()} more (click to show ${Math.min(200, list.length - i)} more)` });
-      more.addEventListener('click', () => { V.limits.set(pk, limit + 200); renderTree(); });
-      parent.append(more);
-    }
-  }
-
-  function renderTree() {
-    const tree = el.vTree;
-    rowEls.clear();
-    tree.replaceChildren();
-    if (!V.res) { tree.append(h('div', { class: 'empty', text: 'Paste or open something on the left.' })); return; }
-    if (!V.res.ok) { tree.append(h('div', { class: 'empty', text: 'Fix the error shown on the left to see the tree.' })); return; }
-    const ctx = { budget: TREE_BUDGET, over: false };
-    const frag = document.createDocumentFragment();
-    const t0 = performance.now();
-    renderNode(frag, V.res.node, [], null, 0, ctx);
-    tree.append(frag);
-    if (ctx.over) tree.append(h('div', { class: 'notice', text: `Showing the first ${TREE_BUDGET.toLocaleString()} rows to keep the page responsive. Collapse branches, lower the depth, or use search / JSONPath to reach the rest.` }));
-    log('debug', 'tree-rendered', { rows: TREE_BUDGET - ctx.budget, ms: Math.round(performance.now() - t0) });
-  }
-
-  el.vTree.addEventListener('click', (e) => {
-    const row = e.target.closest('.row');
-    const more = e.target.closest('.more-row');
-    if (more || !row) return;
-    const info = rowInfo.get(row);
-    if (!info) return;
-    const act = e.target.closest('[data-act]');
-    if (act) {
-      if (act.dataset.act === 'path') copyText(pathToString(info.path), 'path');
-      else copyText(serialize(info.node, { style: 'json', indent: 2 }).text, info.node.t === 'obj' || info.node.t === 'arr' ? 'subtree' : 'value');
-      return;
-    }
-    if (e.target.closest('input')) return;
-    if (info.node.t === 'obj' || info.node.t === 'arr') {
-      const pk = row.dataset.pk;
-      const depth = info.path.length;
-      if (isOpen(pk, depth)) { V.collapsed.add(pk); V.expanded.delete(pk); } else { V.expanded.add(pk); V.collapsed.delete(pk); }
-      renderTree();
-    }
-  });
-
-  // in-tree editing of primitive values
-  el.vTree.addEventListener('dblclick', (e) => {
-    const span = e.target.closest('.val');
-    if (!span) return;
-    const info = rowInfo.get(span.closest('.row'));
-    if (!info) return;
-    const n = info.node;
-    const input = h('input', { class: 'edit', value: n.t === 'str' ? JSON.stringify(n.v) : n.t === 'num' ? n.raw : n.t === 'bool' ? String(n.v) : 'null', 'aria-label': 'Edit value' });
-    span.replaceWith(input);
-    input.focus();
-    input.select();
-    let finished = false;
-    const finish = (commit) => {
-      if (finished) return;
-      finished = true;
-      if (commit) commitEdit(n, input.value); else renderTree();
-    };
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } else if (ev.key === 'Escape') finish(false);
-    });
-    input.addEventListener('blur', () => finish(false));
-  });
-
-  function commitEdit(node, text) {
-    const p = JSS.parser.tryParse(text.trim());
-    let repl;
-    if (p.ok && !(p.node.t === 'str' && p.node.tag === 'repr')) repl = p.node;
-    else repl = JSS.ast.N.str(text);
-    for (const k of Object.keys(node)) delete node[k];
-    Object.assign(node, repl);
-    log('info', 'tree-edit', { newType: repl.t });
-    syncInputFromTree();
-  }
-
-  function syncInputFromTree() {
-    const out = serialize(V.res.node, { style: outputStyle(), indent: indentOpt() === 0 ? 2 : indentOpt(), sortKeys: false });
-    el.vInput.value = out.text;
-    V.dirty = true;
-    persistSession();
-    reloadViewer({ keepView: true });
-  }
-
-  // ---- search
-  function runSearch(silent) {
-    V.term = el.vSearch.value.trim().toLowerCase();
-    V.matches = []; V.matchKeys = new Set(); V.visible = new Set(); V.idx = -1; V.curKey = null;
-    const t = V.term;
-    if (t && V.res && V.res.ok) {
-      walk(V.res.node, (n, path) => {
-        if (V.matches.length >= 5000) return false;
-        const last = path[path.length - 1];
-        let hit = typeof last === 'string' && last.toLowerCase().includes(t);
-        if (!hit) {
-          if (n.t === 'str') hit = n.v.toLowerCase().includes(t);
-          else if (n.t === 'num') hit = n.raw.toLowerCase().includes(t);
-          else if (n.t === 'bool') hit = String(n.v).includes(t);
-          else if (n.t === 'null') hit = 'null'.includes(t);
-        }
-        if (hit) V.matches.push(path);
-        return undefined;
+  class DocPane {
+    constructor(side) {
+      this.side = side;
+      this.root = $('paneTpl').content.firstElementChild.cloneNode(true);
+      this.root.dataset.pane = side;
+      this.q('[data-label]').textContent = side.toUpperCase();
+      this.input = this.q('[data-input]');
+      Object.assign(this, {
+        text: '', res: null, seq: 0, pick: undefined, view: prefs.panes[side].view, depth: prefs.depth,
+        expanded: new Set(), collapsed: new Set(), limits: new Map(), term: '', matches: [], matchKeys: new Set(), visible: new Set(),
+        idx: -1, curKey: null, filter: false, handle: null, name: 'Untitled', mtime: 0, dirty: false, embedded: 0, nodes: 0,
+        query: null, queryOpen: false, repairInfo: null, fmtText: '', onResult: () => {},
       });
-      for (const p of V.matches) for (let i = 0; i <= p.length; i++) V.visible.add(pathKey(p.slice(0, i)));
-      for (const p of V.matches) V.matchKeys.add(pathKey(p));
-      // Open the branches of the first matches so they are visible and highlighted, not hidden in collapsed nodes.
-      for (const p of V.matches.slice(0, 200)) expandAncestors(p);
+      this.rowInfo = new WeakMap();
+      this.rowEls = new Map();
+      this.scheduleReload = debounce(() => this.reload(), 250);
+      this.runSearchDebounced = debounce(() => this.runSearch(), 200);
+      this.bind();
     }
-    el.vSearchCount.textContent = !t ? '' : V.matches.length ? `${V.matches.length}${V.matches.length >= 5000 ? '+' : ''} matches` : 'no matches';
-    log('debug', 'search', { termLength: t.length, matches: V.matches.length });
-    if (silent) return;
-    if (V.matches.length) goToMatch(0); else renderViewer();
-  }
-  const runSearchDebounced = debounce(() => runSearch(), 200);
+    q(sel) { return this.root.querySelector(sel); }
+    qa(sel) { return [...this.root.querySelectorAll(sel)]; }
+    get ok() { return Boolean(this.res && this.res.ok); }
+    label() { return this.side.toUpperCase(); }
 
-  function goToMatch(i) {
-    if (!V.matches.length) return;
-    V.idx = ((i % V.matches.length) + V.matches.length) % V.matches.length;
-    const path = V.matches[V.idx];
-    V.curKey = pathKey(path);
-    el.vSearchCount.textContent = `${V.idx + 1} / ${V.matches.length}${V.matches.length >= 5000 ? '+' : ''}`;
-    reveal(path);
-  }
+    // ---------------------------------------------------------------- wiring
+    bind() {
+      this.input.addEventListener('input', () => { this.pick = undefined; this.repairInfo = null; this.dirty = true; this.scheduleReload(); persistSession(); });
+      this.root.addEventListener('focusin', () => setActive(this));
+      this.root.addEventListener('mousedown', () => setActive(this));
+      this.q('[data-views]').addEventListener('click', (e) => { const b = e.target.closest('[data-view]'); if (b) this.setView(b.dataset.view, true); });
+      this.root.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        const actions = {
+          open: () => this.open(), paste: () => this.paste(), clear: () => this.clear(),
+          save: () => this.save(false), saveas: () => this.save(true), apply: () => this.applyFormat(),
+          'copy-raw': () => this.input.value && copyText(this.input.value, 'raw text'),
+          'copy-fmt': () => this.fmtText && copyText(this.fmtText, 'formatted output'),
+          download: () => this.download(), 'save-fmt': () => this.saveFormatted(),
+          prev: () => this.goToMatch(this.idx - 1), next: () => this.goToMatch(this.idx + 1),
+          'expand-all': () => { this.depth = 99; this.collapsed.clear(); this.expanded.clear(); this.q('[data-depth]').value = '99'; this.renderTree(); },
+          'collapse-all': () => { this.depth = 1; this.collapsed.clear(); this.expanded.clear(); this.q('[data-depth]').value = '1'; this.renderTree(); },
+          embedded: () => {
+            const n = JSS.loader.expandEmbedded(this.res.node);
+            toast(`Expanded ${plural(n, 'embedded value')}`);
+            this.syncInputFromTree();
+          },
+        };
+        if (actions[b.dataset.act]) actions[b.dataset.act]();
+      });
+      this.q('[data-search]').addEventListener('input', () => this.runSearchDebounced());
+      this.q('[data-search]').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (this.term) this.goToMatch(this.idx + (e.shiftKey ? -1 : 1)); } });
+      this.q('[data-filter]').addEventListener('change', (e) => { this.filter = e.target.checked; this.render(); });
+      this.q('[data-query]').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.runQuery(); } });
+      this.q('[data-query]').addEventListener('input', (e) => { if (!e.target.value.trim()) this.runQuery(); });
+      this.q('[data-depth]').addEventListener('change', (e) => { this.depth = Number(e.target.value); prefs.depth = this.depth; savePrefs(); this.collapsed.clear(); this.expanded.clear(); this.renderTree(); });
+      this.q('[data-f-style]').addEventListener('change', (e) => { prefs.outStyle = e.target.value; savePrefs(); panes.a.refreshPreview(); panes.b.refreshPreview(); });
+      this.q('[data-f-indent]').addEventListener('change', (e) => { prefs.indent = e.target.value; savePrefs(); panes.a.refreshPreview(); panes.b.refreshPreview(); });
+      this.q('[data-f-sort]').addEventListener('change', (e) => { prefs.sort = e.target.checked; savePrefs(); panes.a.refreshPreview(); panes.b.refreshPreview(); });
 
-  /** Opens every ancestor of `path` and widens paged arrays so the row exists in the tree. */
-  function expandAncestors(path) {
-    const root = V.res.node;
-    for (let i = 0; i < path.length; i++) {
-      const anc = path.slice(0, i);
-      const pk = pathKey(anc);
-      V.expanded.add(pk); V.collapsed.delete(pk);
-      const n = getAt(root, anc);
-      if (n && n.t === 'arr' && typeof path[i] === 'number') V.limits.set(pk, Math.max(V.limits.get(pk) || 200, Math.ceil((path[i] + 1) / 200) * 200));
+      const tree = this.q('[data-tree]');
+      tree.addEventListener('click', (e) => this.onTreeClick(e));
+      tree.addEventListener('dblclick', (e) => this.onTreeDblClick(e));
     }
-  }
 
-  function reveal(path) {
-    expandAncestors(path);
-    if (V.tab !== 'tree') { V.tab = 'tree'; renderViewer(); } else renderTree();
-    const row = rowEls.get(pathKey(path));
-    if (row) { row.scrollIntoView({ block: 'center' }); row.classList.add('flash'); }
-  }
-
-  // ---- formatted output
-  function renderFormatted() {
-    $('fStyle').value = prefs.outStyle; $('fIndent').value = prefs.indent; $('fSort').checked = prefs.sort;
-    if (!V.res || !V.res.ok) { el.vFormatted.value = ''; el.fNote.textContent = ''; V.fmtText = ''; return; }
-    const out = formattedOut();
-    V.fmtText = out.text;
-    el.vFormatted.value = out.text.length > 2000000 ? `${out.text.slice(0, 2000000)}\n… truncated in this view. Copy and Download give the full text.` : out.text;
-    el.fNote.textContent = out.warnings.join(' · ');
-  }
-
-  // ---- query
-  function runQuery() {
-    const src = el.vQuery.value.trim();
-    if (!src) { V.query = null; if (V.tab === 'query') setTab('tree'); else renderViewer(); return; }
-    if (!V.res || !V.res.ok) return;
-    const r = JSS.query.query(V.res.node, src);
-    V.query = r;
-    log('info', 'query', { results: r.results.length, error: Boolean(r.error) });
-    V.tab = 'query'; // transient: the query tab is not saved as the preferred tab
-    renderViewer();
-  }
-  function renderQuery() {
-    const box = el.vQueryBox;
-    box.replaceChildren();
-    $('vQueryCount').textContent = V.query && !V.query.error ? `(${V.query.results.length}${V.query.truncated ? '+' : ''})` : '';
-    if (!V.query) { box.append(h('div', { class: 'empty', text: 'Type a JSONPath above and press Enter.' })); return; }
-    if (V.query.error) { box.append(h('div', { class: 'notice', text: `Query error: ${V.query.error}` })); return; }
-    if (!V.query.results.length) { box.append(h('div', { class: 'empty', text: 'No results.' })); return; }
-    const frag = document.createDocumentFragment();
-    for (const r of V.query.results.slice(0, 2000)) {
-      const preview = r.node.t === 'obj' || r.node.t === 'arr' ? JSS.ast.describe(r.node) : serialize(r.node, { style: 'json', indent: 0 }).text;
-      const row = h('div', { class: 'q-row', title: 'Show in tree' }, h('span', { class: 'q-path', text: pathToString(r.path, { root: true }) }), h('span', { class: 'q-val', text: trunc(preview, 200) }));
-      row.addEventListener('click', () => reveal(r.path));
-      frag.append(row);
-    }
-    box.append(frag);
-    if (V.query.results.length > 2000) box.append(h('div', { class: 'notice', text: 'Showing the first 2,000 results.' }));
-  }
-
-  // ---- viewer: file operations
-  async function openIntoViewer() {
-    try {
-      const f = await pickFile();
-      setViewerFile(f);
-    } catch (err) {
-      if (err.name === 'AbortError') return;
-      log('error', 'open-failed', { error: String(err) });
-      toast(`Open failed: ${err.message || err}`, 'error');
-    }
-  }
-  function setViewerFile(f) {
-    el.vInput.value = f.text;
-    V.handle = f.handle || null; V.name = f.name; V.mtime = f.mtime || 0; V.dirty = false; V.pick = undefined; V.repairInfo = null;
-    if (prefs.mode !== 'viewer') setMode('viewer');
-    reloadViewer();
-    persistSession();
-  }
-  async function saveViewer(as) {
-    if (!V.text) return;
-    try {
-      let handle = V.handle;
-      if (as || !handle) {
-        if (!window.showSaveFilePicker) return toast('This browser does not support the File System Access API.', 'error');
-        handle = await window.showSaveFilePicker({ suggestedName: V.name.includes('.') ? V.name : `${V.name}.json`, types: PICKER_TYPES });
-      } else {
-        if (!(await ensurePermission(handle, 'readwrite'))) return toast('Write permission was denied.', 'error');
-        const cur = await handle.getFile();
-        if (V.mtime && cur.lastModified > V.mtime && !confirm(`"${V.name}" changed on disk after you opened it.\n\nOverwrite it with your version?`)) return;
+    // ---------------------------------------------------------------- loading
+    async reload(opts) {
+      opts = opts || {};
+      const text = this.input.value;
+      this.text = text;
+      const seq = ++this.seq;
+      if (!text.trim()) {
+        this.res = null; this.nodes = 0; this.embedded = 0;
+        this.resetView();
+        this.render();
+        this.onResult();
+        return;
       }
+      setStatus('Parsing…');
+      const res = await loadText(text, { pick: this.pick });
+      if (seq !== this.seq) { log('debug', 'stale-result-dropped', { pane: this.side, seq }); return; }
+      setStatus('');
+      this.res = res;
+      this.nodes = res.ok ? countNodes(res.node) : 0;
+      this.embedded = res.ok && text.length < 3000000 ? JSS.loader.findEmbedded(res.node, 200).length : 0;
+      if (!opts.keepView) this.resetView(); else if (this.term) this.runSearch(true);
+      $('stLeft').textContent = res.ok ? `${this.label()}: ${res.label} · parsed in ${res.ms} ms` : `${this.label()}: parse error`;
+      this.render();
+      this.onResult();
+    }
+
+    resetView() {
+      this.expanded.clear(); this.collapsed.clear(); this.limits.clear(); this.curKey = null; this.idx = -1;
+      this.query = null; this.queryOpen = false;
+      this.runSearch(true);
+    }
+
+    /** Switch to the tree the first time content arrives, unless the user chose a view for this pane. */
+    autoSwitch() {
+      if (!prefs.panes[this.side].picked && this.view === 'raw') this.setView('tree', false);
+    }
+
+    setFile(f) {
+      this.input.value = f.text;
+      this.handle = f.handle || null; this.name = f.name; this.mtime = f.mtime || 0; this.dirty = false; this.pick = undefined; this.repairInfo = null;
+      this.autoSwitch();
+      this.reload();
+      persistSession();
+    }
+
+    setView(view, byUser) {
+      this.view = view;
+      prefs.panes[this.side].view = view;
+      if (byUser) prefs.panes[this.side].picked = true;
+      savePrefs();
+      this.render();
+    }
+
+    // ---------------------------------------------------------------- rendering
+    outputStyle() {
+      if (prefs.outStyle !== 'auto') return prefs.outStyle;
+      const f = this.res && this.res.format;
+      return f === 'python' ? 'python' : f === 'javascript' || f === 'json5' ? 'js' : 'json';
+    }
+    indentOpt() { return prefs.indent === 'tab' ? 'tab' : Number(prefs.indent); }
+    formattedOut() { return serialize(this.res.node, { style: this.outputStyle(), indent: this.indentOpt(), sortKeys: prefs.sort, nonFinite: 'keep' }); }
+
+    render() {
+      const ok = this.ok;
+      const info = this.q('[data-info]');
+      info.replaceChildren();
+      if (this.repairInfo) {
+        info.append(h('div', { class: 'info' }, h('div', { class: 'note-repair' },
+          h('strong', { text: 'Repaired: ' }), this.repairInfo.changes.join('; '), ' ',
+          h('button', { class: 'tb', text: 'Undo', onclick: () => this.undoRepair() }))));
+      }
+      if (this.res) {
+        info.append(resultInfo(this.res, {
+          goTo: (pos) => {
+            this.setView('raw', true);
+            this.input.focus(); this.input.setSelectionRange(pos, pos);
+            const line = this.input.value.slice(0, pos).split('\n').length;
+            this.input.scrollTop = Math.max(0, (line - 4) * 20.8);
+          },
+          repair: () => this.doRepair(),
+          pick: (i) => { this.pick = i; this.reload(); },
+        }));
+      }
+      this.q('[data-name]').textContent = this.name + (this.dirty && this.handle ? ' ●' : '');
+      this.qa('[data-views] button').forEach((b) => b.classList.toggle('active', b.dataset.view === this.view));
+      this.q('[data-view-raw]').hidden = this.view !== 'raw';
+      this.q('[data-view-preview]').hidden = this.view !== 'preview';
+      this.q('[data-view-tree]').hidden = this.view !== 'tree';
+      const meta = this.text ? `${fmtBytes(this.text.length)}${ok ? ` · ${plural(this.nodes, 'node')}` : ''}` : '';
+      this.q('[data-meta-raw]').textContent = meta;
+      this.q('[data-meta-tree]').textContent = meta;
+      const emb = this.q('[data-act="embedded"]');
+      emb.hidden = !ok || this.embedded === 0;
+      emb.textContent = `Expand embedded JSON (${this.embedded}${this.embedded >= 200 ? '+' : ''})`;
+      this.q('[data-act="apply"]').disabled = !ok;
+      this.q('[data-act="save"]').disabled = !this.text;
+      this.q('[data-act="saveas"]').disabled = !this.text;
+      this.qa('[data-view-preview] .toolbar2 button, [data-view-preview] .toolbar2 select, [data-view-preview] .toolbar2 input').forEach((c) => { c.disabled = !ok; });
+      this.qa('[data-tree-bar] button, [data-tree-bar] input, [data-tree-bar] select').forEach((c) => { if (c !== emb) c.disabled = !ok; });
+      if (this.view === 'tree') { if (this.queryOpen) this.renderQuery(); else this.renderTree(); } else if (this.view === 'preview') this.renderPreview();
+    }
+
+    refreshPreview() { if (this.view === 'preview') this.renderPreview(); }
+
+    renderPreview() {
+      this.q('[data-f-style]').value = prefs.outStyle; this.q('[data-f-indent]').value = prefs.indent; this.q('[data-f-sort]').checked = prefs.sort;
+      const pre = this.q('[data-preview]');
+      if (!this.ok) { pre.replaceChildren(h('span', { class: 'v-sum', text: this.res ? 'Fix the error shown above to see the preview.' : 'Nothing to preview yet.' })); this.fmtText = ''; this.q('[data-f-note]').textContent = ''; return; }
+      const out = this.formattedOut();
+      this.fmtText = out.text;
+      highlightInto(pre, out.text);
+      this.q('[data-f-note]').textContent = out.warnings.join(' · ');
+    }
+
+    // ---------------------------------------------------------------- tree
+    isOpen(pk, depth) { return this.collapsed.has(pk) ? false : this.expanded.has(pk) ? true : depth < this.depth; }
+
+    renderNode(parent, node, path, kinfo, depth, ctx) {
+      if (ctx.budget <= 0) { ctx.over = true; return; }
+      const pk = pathKey(path);
+      if (this.filter && this.term && !this.visible.has(pk)) return;
+      ctx.budget--;
+      const container = node.t === 'obj' || node.t === 'arr';
+      const open = container && this.isOpen(pk, depth);
+      const row = h('div', { class: 'row', style: `padding-left:${8 + depth * 16}px` });
+      row.dataset.pk = pk;
+      if (this.matchKeys.has(pk)) row.classList.add('match');
+      if (this.curKey === pk) row.classList.add('current');
+      row.append(h('span', { class: `caret${container ? '' : ' leaf'}`, text: container ? (open ? '▾' : '▸') : '' }));
+      if (kinfo) {
+        const label = kinfo.idx ? String(kinfo.text) : (kinfo.keyType === 'num' || kinfo.keyType === 'tuple' ? kinfo.text : JSON.stringify(trunc(kinfo.text, 120)));
+        row.append(h('span', { class: `k${kinfo.idx ? ' idx' : ''}`, text: label }), h('span', { class: 'colon', text: ':' }));
+      }
+      row.append(valueSpan(node, open), ...badges(node));
+      row.append(h('span', { class: 'acts' },
+        h('button', { 'data-act': 'path', title: 'Copy path', text: 'path' }),
+        h('button', { 'data-act': 'copy', title: container ? 'Copy this subtree as JSON' : 'Copy value', text: 'copy' })));
+      parent.append(row);
+      this.rowInfo.set(row, { node, path });
+      this.rowEls.set(pk, row);
+      if (open) this.renderChildren(parent, node, path, depth + 1, ctx, pk);
+    }
+
+    renderChildren(parent, node, path, depth, ctx, pk) {
+      const list = children(node);
+      const limit = this.limits.get(pk) || 200;
+      const filtering = this.filter && this.term;
+      let shown = 0, i = 0;
+      for (; i < list.length; i++) {
+        if (!filtering && shown >= limit) break;
+        const [k, v] = list[i];
+        const before = ctx.budget;
+        this.renderNode(parent, v, path.concat(k), {
+          text: k, idx: node.t === 'arr', keyType: node.t === 'obj' ? node.entries[i].keyType : undefined,
+        }, depth, ctx);
+        if (ctx.budget !== before) shown++;
+        if (ctx.budget <= 0) return;
+      }
+      if (!filtering && i < list.length) {
+        const more = h('div', { class: 'more-row', style: `padding-left:${8 + depth * 16 + 18}px`, text: `… ${(list.length - i).toLocaleString()} more (click to show ${Math.min(200, list.length - i)} more)` });
+        more.addEventListener('click', () => { this.limits.set(pk, limit + 200); this.renderTree(); });
+        parent.append(more);
+      }
+    }
+
+    renderTree() {
+      const tree = this.q('[data-tree]');
+      this.q('[data-query-box]').hidden = true;
+      tree.hidden = false;
+      this.rowEls.clear();
+      tree.replaceChildren();
+      if (!this.res) { tree.append(h('div', { class: 'empty', text: 'Nothing here yet. Use Open or Paste above, or switch to Raw to type.' })); return; }
+      if (!this.res.ok) { tree.append(h('div', { class: 'empty', text: 'Fix the error shown above to see the tree.' })); return; }
+      const ctx = { budget: TREE_BUDGET, over: false };
+      const frag = document.createDocumentFragment();
+      const t0 = performance.now();
+      this.renderNode(frag, this.res.node, [], null, 0, ctx);
+      tree.append(frag);
+      if (ctx.over) tree.append(h('div', { class: 'notice', text: `Showing the first ${TREE_BUDGET.toLocaleString()} rows to keep the page responsive. Collapse branches, lower the depth, or use search / JSONPath to reach the rest.` }));
+      log('debug', 'tree-rendered', { pane: this.side, rows: TREE_BUDGET - ctx.budget, ms: Math.round(performance.now() - t0) });
+    }
+
+    onTreeClick(e) {
+      const row = e.target.closest('.row');
+      if (e.target.closest('.more-row') || !row) return;
+      const info = this.rowInfo.get(row);
+      if (!info) return;
+      const act = e.target.closest('[data-act]');
+      if (act) {
+        if (act.dataset.act === 'path') copyText(pathToString(info.path), 'path');
+        else if (act.dataset.act === 'copy') copyText(serialize(info.node, { style: 'json', indent: 2 }).text, info.node.t === 'obj' || info.node.t === 'arr' ? 'subtree' : 'value');
+        return;
+      }
+      if (e.target.closest('input')) return;
+      if (info.node.t === 'obj' || info.node.t === 'arr') {
+        const pk = row.dataset.pk;
+        if (this.isOpen(pk, info.path.length)) { this.collapsed.add(pk); this.expanded.delete(pk); } else { this.expanded.add(pk); this.collapsed.delete(pk); }
+        this.renderTree();
+      }
+    }
+
+    onTreeDblClick(e) {
+      const span = e.target.closest('.val');
+      if (!span) return;
+      const info = this.rowInfo.get(span.closest('.row'));
+      if (!info) return;
+      const n = info.node;
+      const input = h('input', { class: 'edit', value: n.t === 'str' ? JSON.stringify(n.v) : n.t === 'num' ? n.raw : n.t === 'bool' ? String(n.v) : 'null', 'aria-label': 'Edit value' });
+      span.replaceWith(input);
+      input.focus();
+      input.select();
+      let finished = false;
+      const finish = (commit) => {
+        if (finished) return;
+        finished = true;
+        if (commit) this.commitEdit(n, input.value); else this.renderTree();
+      };
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } else if (ev.key === 'Escape') finish(false);
+      });
+      input.addEventListener('blur', () => finish(false));
+    }
+
+    commitEdit(node, text) {
+      const p = JSS.parser.tryParse(text.trim());
+      const repl = p.ok && !(p.node.t === 'str' && p.node.tag === 'repr') ? p.node : JSS.ast.N.str(text);
+      for (const k of Object.keys(node)) delete node[k];
+      Object.assign(node, repl);
+      log('info', 'tree-edit', { pane: this.side, newType: repl.t });
+      this.syncInputFromTree();
+    }
+
+    syncInputFromTree() {
+      const out = serialize(this.res.node, { style: this.outputStyle(), indent: this.indentOpt() === 0 ? 2 : this.indentOpt(), sortKeys: false });
+      this.input.value = out.text;
+      this.dirty = true;
+      persistSession();
+      this.reload({ keepView: true });
+    }
+
+    // ---------------------------------------------------------------- search
+    runSearch(silent) {
+      this.term = this.q('[data-search]').value.trim().toLowerCase();
+      this.matches = []; this.matchKeys = new Set(); this.visible = new Set(); this.idx = -1; this.curKey = null;
+      const t = this.term;
+      if (t && this.ok) {
+        walk(this.res.node, (n, path) => {
+          if (this.matches.length >= 5000) return false;
+          const last = path[path.length - 1];
+          let hit = typeof last === 'string' && last.toLowerCase().includes(t);
+          if (!hit) {
+            if (n.t === 'str') hit = n.v.toLowerCase().includes(t);
+            else if (n.t === 'num') hit = n.raw.toLowerCase().includes(t);
+            else if (n.t === 'bool') hit = String(n.v).includes(t);
+            else if (n.t === 'null') hit = 'null'.includes(t);
+          }
+          if (hit) this.matches.push(path);
+          return undefined;
+        });
+        for (const p of this.matches) for (let i = 0; i <= p.length; i++) this.visible.add(pathKey(p.slice(0, i)));
+        for (const p of this.matches) this.matchKeys.add(pathKey(p));
+        for (const p of this.matches.slice(0, 200)) this.expandAncestors(p); // open the first matches' branches so they are visible
+      }
+      this.q('[data-search-count]').textContent = !t ? '' : this.matches.length ? `${this.matches.length}${this.matches.length >= 5000 ? '+' : ''} matches` : 'no matches';
+      log('debug', 'search', { pane: this.side, termLength: t.length, matches: this.matches.length });
+      if (silent) return;
+      if (this.matches.length) this.goToMatch(0); else this.render();
+    }
+
+    goToMatch(i) {
+      if (!this.matches.length) return;
+      this.idx = ((i % this.matches.length) + this.matches.length) % this.matches.length;
+      const path = this.matches[this.idx];
+      this.curKey = pathKey(path);
+      this.q('[data-search-count]').textContent = `${this.idx + 1} / ${this.matches.length}${this.matches.length >= 5000 ? '+' : ''}`;
+      this.reveal(path);
+    }
+
+    /** Opens every ancestor of `path` and widens paged arrays so the row exists in the tree. */
+    expandAncestors(path) {
+      const root = this.res.node;
+      for (let i = 0; i < path.length; i++) {
+        const anc = path.slice(0, i);
+        const pk = pathKey(anc);
+        this.expanded.add(pk); this.collapsed.delete(pk);
+        const n = getAt(root, anc);
+        if (n && n.t === 'arr' && typeof path[i] === 'number') this.limits.set(pk, Math.max(this.limits.get(pk) || 200, Math.ceil((path[i] + 1) / 200) * 200));
+      }
+    }
+
+    reveal(path) {
+      this.expandAncestors(path);
+      this.queryOpen = false;
+      if (this.view !== 'tree') this.view = 'tree';
+      this.render();
+      const row = this.rowEls.get(pathKey(path));
+      if (row) { row.scrollIntoView({ block: 'center' }); row.classList.add('flash'); }
+    }
+
+    // ---------------------------------------------------------------- JSONPath
+    runQuery() {
+      const src = this.q('[data-query]').value.trim();
+      if (!src) { this.query = null; this.queryOpen = false; this.render(); return; }
+      if (!this.ok) return;
+      const r = JSS.query.query(this.res.node, src);
+      this.query = r;
+      this.queryOpen = true;
+      log('info', 'query', { pane: this.side, results: r.results.length, error: Boolean(r.error) });
+      this.render();
+    }
+
+    renderQuery() {
+      const box = this.q('[data-query-box]');
+      this.q('[data-tree]').hidden = true;
+      box.hidden = false;
+      box.replaceChildren();
+      const head = h('div', { class: 'q-head' },
+        h('strong', { text: this.query && !this.query.error ? `${this.query.results.length}${this.query.truncated ? '+' : ''} result${this.query.results.length === 1 ? '' : 's'}` : 'Query' }),
+        h('button', { class: 'tb', text: '← Back to tree', onclick: () => { this.queryOpen = false; this.render(); } }));
+      box.append(head);
+      if (!this.query) return;
+      if (this.query.error) { box.append(h('div', { class: 'notice', text: `Query error: ${this.query.error}` })); return; }
+      if (!this.query.results.length) { box.append(h('div', { class: 'empty', text: 'No results.' })); return; }
+      const frag = document.createDocumentFragment();
+      for (const r of this.query.results.slice(0, 2000)) {
+        const preview = r.node.t === 'obj' || r.node.t === 'arr' ? JSS.ast.describe(r.node) : serialize(r.node, { style: 'json', indent: 0 }).text;
+        const row = h('div', { class: 'q-row', title: 'Show in tree' }, h('span', { class: 'q-path', text: pathToString(r.path, { root: true }) }), h('span', { class: 'q-val', text: trunc(preview, 200) }));
+        row.addEventListener('click', () => this.reveal(r.path));
+        frag.append(row);
+      }
+      box.append(frag);
+      if (this.query.results.length > 2000) box.append(h('div', { class: 'notice', text: 'Showing the first 2,000 results.' }));
+    }
+
+    // ---------------------------------------------------------------- repair
+    doRepair() {
+      const r = JSS.loader.repair(this.input.value);
+      if (!r) return toast('No automatic repair is possible for this input.', 'error');
+      this.repairInfo = { before: this.input.value, changes: r.changes };
+      this.input.value = r.text;
+      log('info', 'repair-applied', { pane: this.side, changes: r.changes.length });
+      this.reload();
+    }
+    undoRepair() {
+      if (!this.repairInfo) return;
+      this.input.value = this.repairInfo.before;
+      this.repairInfo = null;
+      this.reload();
+    }
+
+    // ---------------------------------------------------------------- input actions
+    clear() {
+      this.input.value = ''; this.handle = null; this.name = 'Untitled'; this.dirty = false; this.repairInfo = null; this.pick = undefined;
+      this.reload(); persistSession(); this.input.focus();
+    }
+    async paste() {
+      try {
+        this.input.value = await navigator.clipboard.readText();
+        this.dirty = true;
+        this.autoSwitch();
+        this.reload();
+        persistSession();
+      } catch {
+        this.setView('raw', true);
+        this.input.focus();
+        toast('Clipboard access was blocked. Press Ctrl/Cmd+V in the box instead.');
+      }
+    }
+    applyFormat() {
+      if (!this.ok) return;
+      this.input.value = this.formattedOut().text;
+      this.repairInfo = null; this.dirty = true;
+      this.reload({ keepView: true });
+      persistSession();
+      toast('Raw text replaced with the formatted output');
+    }
+
+    // ---------------------------------------------------------------- files
+    async open() {
+      try {
+        this.setFile(await pickFile());
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        log('error', 'open-failed', { pane: this.side, error: String(err) });
+        toast(`Open failed: ${err.message || err}`, 'error');
+      }
+    }
+
+    async save(as) {
+      if (!this.input.value) return;
+      try {
+        let handle = this.handle;
+        if (as || !handle) {
+          if (!window.showSaveFilePicker) return toast('This browser does not support the File System Access API.', 'error');
+          handle = await window.showSaveFilePicker({ suggestedName: this.name.includes('.') ? this.name : `${this.name}.json`, types: PICKER_TYPES });
+        } else {
+          if (!(await ensurePermission(handle, 'readwrite'))) return toast('Write permission was denied.', 'error');
+          const cur = await handle.getFile();
+          if (this.mtime && cur.lastModified > this.mtime && !confirm(`"${this.name}" changed on disk after you opened it.\n\nOverwrite it with your version?`)) return;
+        }
+        await this.write(handle, this.input.value);
+        this.handle = handle; this.name = handle.name; this.mtime = (await handle.getFile()).lastModified; this.dirty = false;
+        log('info', 'saved', { pane: this.side, name: this.name, bytes: this.input.value.length });
+        toast(`${this.label()}: saved ${this.name}`);
+        this.render();
+        persistSession();
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        log('error', 'save-failed', { pane: this.side, error: String(err) });
+        toast(`Save failed: ${err.message || err}`, 'error');
+      }
+    }
+
+    async saveFormatted() {
+      if (!this.fmtText) return;
+      try {
+        if (!window.showSaveFilePicker) return toast('This browser does not support the File System Access API.', 'error');
+        const ext = { json: 'json', python: 'py', js: 'js' }[this.outputStyle()];
+        const base = this.name.replace(/\.[^.]*$/, '') || 'document';
+        const handle = await window.showSaveFilePicker({ suggestedName: `${base}.formatted.${ext}`, types: PICKER_TYPES });
+        await this.write(handle, this.fmtText);
+        log('info', 'saved-formatted', { pane: this.side, bytes: this.fmtText.length });
+        toast(`${this.label()}: saved ${handle.name}`);
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        log('error', 'save-formatted-failed', { pane: this.side, error: String(err) });
+        toast(`Save failed: ${err.message || err}`, 'error');
+      }
+    }
+
+    async write(handle, text) {
       const w = await handle.createWritable();
-      try { await w.write(el.vInput.value); } catch (err) { await w.abort().catch(() => {}); throw err; }
+      try { await w.write(text); } catch (err) { await w.abort().catch(() => {}); throw err; }
       await w.close();
-      V.handle = handle; V.name = handle.name; V.mtime = (await handle.getFile()).lastModified; V.dirty = false;
-      log('info', 'saved', { name: V.name, bytes: el.vInput.value.length });
-      toast(`Saved ${V.name}`);
-      renderViewer();
-    } catch (err) {
-      if (err.name === 'AbortError') return;
-      log('error', 'save-failed', { error: String(err) });
-      toast(`Save failed: ${err.message || err}`, 'error');
+    }
+
+    download() {
+      if (!this.fmtText) return;
+      const ext = { json: 'json', python: 'py', js: 'js' }[this.outputStyle()];
+      const base = this.name.replace(/\.[^.]*$/, '') || 'document';
+      const url = URL.createObjectURL(new Blob([this.fmtText], { type: 'text/plain' }));
+      h('a', { href: url, download: `${base}.formatted.${ext}` }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
     }
   }
 
-  // ---- viewer: wiring
-  el.vInput.addEventListener('input', () => { V.pick = undefined; V.repairInfo = null; V.dirty = true; scheduleReload(); persistSession(); });
-  $('vClear').addEventListener('click', () => {
-    el.vInput.value = ''; V.handle = null; V.name = 'Untitled'; V.dirty = false; V.repairInfo = null; V.pick = undefined;
-    reloadViewer(); persistSession(); el.vInput.focus();
-  });
-  async function pasteInto(textarea, after) {
-    try {
-      textarea.value = await navigator.clipboard.readText();
-      after();
-    } catch {
-      textarea.focus();
-      toast('Clipboard access was blocked. Press Ctrl/Cmd+V in the box instead.');
-    }
+  function setActive(p) {
+    if (activePane === p) return;
+    activePane = p;
+    Object.values(panes).forEach((x) => x.root.classList.toggle('active', x === p));
   }
-  $('vPaste').addEventListener('click', () => pasteInto(el.vInput, () => { V.dirty = true; reloadViewer(); persistSession(); }));
-  $('vApply').addEventListener('click', () => {
-    if (!V.res || !V.res.ok) return;
-    el.vInput.value = formattedOut().text;
-    V.repairInfo = null; V.dirty = true;
-    reloadViewer({ keepView: true });
-    persistSession();
-    toast('Input replaced with the formatted output');
-  });
-  $('vTabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) { if (b.dataset.tab === 'query' && !V.query) { el.vQuery.focus(); return; } setTab(b.dataset.tab); } });
-  el.vSearch.addEventListener('input', runSearchDebounced);
-  el.vSearch.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (V.term) goToMatch(V.idx + (e.shiftKey ? -1 : 1)); } });
-  $('vNext').addEventListener('click', () => goToMatch(V.idx + 1));
-  $('vPrev').addEventListener('click', () => goToMatch(V.idx - 1));
-  el.vFilter.addEventListener('change', () => { V.filter = el.vFilter.checked; renderViewer(); });
-  el.vQuery.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runQuery(); } });
-  el.vQuery.addEventListener('input', () => { if (!el.vQuery.value.trim()) runQuery(); });
-  $('vExpandAll').addEventListener('click', () => { V.depth = 99; V.collapsed.clear(); V.expanded.clear(); $('vDepth').value = '99'; renderTree(); });
-  $('vCollapseAll').addEventListener('click', () => { V.depth = 1; V.collapsed.clear(); V.expanded.clear(); $('vDepth').value = '1'; renderTree(); });
-  $('vDepth').addEventListener('change', (e) => { V.depth = Number(e.target.value); prefs.depth = V.depth; savePrefs(); V.collapsed.clear(); V.expanded.clear(); renderTree(); });
-  el.vEmbedded.addEventListener('click', () => {
-    const n = JSS.loader.expandEmbedded(V.res.node);
-    toast(`Expanded ${plural(n, 'embedded value')}`);
-    syncInputFromTree();
-  });
-  $('fStyle').addEventListener('change', (e) => { prefs.outStyle = e.target.value; savePrefs(); renderFormatted(); });
-  $('fIndent').addEventListener('change', (e) => { prefs.indent = e.target.value; savePrefs(); renderFormatted(); });
-  $('fSort').addEventListener('change', (e) => { prefs.sort = e.target.checked; savePrefs(); renderFormatted(); });
-  $('fCopy').addEventListener('click', () => V.fmtText && copyText(V.fmtText, 'formatted output'));
-  $('fDownload').addEventListener('click', () => {
-    if (!V.fmtText) return;
-    const ext = { json: 'json', python: 'py', js: 'js' }[outputStyle()];
-    const base = V.name.replace(/\.[^.]*$/, '') || 'document';
-    const url = URL.createObjectURL(new Blob([V.fmtText], { type: 'text/plain' }));
-    h('a', { href: url, download: `${base}.formatted.${ext}` }).click();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  });
-  $('btnOpen').addEventListener('click', openIntoViewer);
-  $('btnSave').addEventListener('click', () => saveViewer(false));
-  $('btnSaveAs').addEventListener('click', () => saveViewer(true));
 
-  // ====================================================================== COMPARE
-  const C = {
-    a: { text: '', res: null, seq: 0, name: '' }, b: { text: '', res: null, seq: 0, name: '' },
-    result: null, tab: 'tree', open: new Set(), closed: new Set(), cur: -1, blocks: [],
-  };
-  const pane = (side) => document.querySelector(`.cmp-in[data-side="${side}"]`);
-  const pq = (side, sel) => pane(side).querySelector(sel);
+  loadPrefs();
+  for (const side of ['a', 'b']) {
+    panes[side] = new DocPane(side);
+    $('paneRow').append(panes[side].root);
+    panes[side].onResult = () => { if (prefs.mode === 'compare') scheduleCompare(); };
+  }
+  setActive(panes.a);
+
+  // ====================================================================== COMPARE (diff of pane A and pane B)
+  const C = { result: null, tab: 'tree', open: new Set(), closed: new Set(), cur: -1, blocks: [], rows: new Map() };
 
   function cmpOptions() {
     return {
@@ -653,45 +771,10 @@
     });
     savePrefs();
   }
-
-  async function reloadSide(side) {
-    const s = C[side];
-    const text = pq(side, '[data-input]').value;
-    s.text = text;
-    const seq = ++s.seq;
-    if (!text.trim()) { s.res = null; renderSide(side); scheduleCompare.now(); return; }
-    setStatus('Parsing…');
-    const res = await loadText(text, {});
-    if (seq !== s.seq) return;
-    setStatus('');
-    s.res = res;
-    renderSide(side);
-    scheduleCompare();
-  }
-  function renderSide(side) {
-    const s = C[side];
-    const info = pq(side, '[data-info]');
-    info.replaceChildren();
-    if (s.res) {
-      info.append(resultInfo(s.res, {
-        goTo: (pos) => { const ta = pq(side, '[data-input]'); ta.focus(); ta.setSelectionRange(pos, pos); },
-        repair: () => {
-          const ta = pq(side, '[data-input]');
-          const r = JSS.loader.repair(ta.value);
-          if (!r) return toast('No automatic repair is possible for this input.', 'error');
-          ta.value = r.text;
-          toast(`Repaired: ${r.changes.join('; ')}`);
-          reloadSide(side);
-        },
-        pick: undefined,
-      }));
-    }
-    pq(side, '[data-name]').textContent = s.name;
-  }
   const scheduleCompare = debounce(() => runCompare(), 200);
 
   function runCompare() {
-    const a = C.a.res, b = C.b.res;
+    const a = panes.a.res, b = panes.b.res;
     if (!(a && a.ok && b && b.ok)) { C.result = null; C.cur = -1; renderCompare(); return; }
     const t0 = performance.now();
     C.result = JSS.diff.compare(a.node, b.node, cmpOptions());
@@ -725,8 +808,7 @@
     if (C.tab === 'tree') renderDiffTree(); else renderTextDiff();
   }
 
-  // ---- aligned tree diff
-  function cellFor(side, m, depth, ctx, container, open) {
+  function cellFor(side, m, depth, container, open) {
     const n = side === 'a' ? m.a : m.b;
     const cell = h('div', { class: `cell ${side}`, style: `padding-left:${8 + depth * 16}px` });
     if (!n) return cell;
@@ -750,7 +832,7 @@
       const [k, v] = list[i];
       const container = v.t === 'obj' || v.t === 'arr';
       const m = { key: k, a: sides.includes('a') ? v : null, b: sides.includes('b') ? v : null, status: klass, path: path.concat(k) };
-      grid.append(h('div', { class: `drow ${klass}` }, cellFor('a', m, depth, ctx, container, container), cellFor('b', m, depth, ctx, container, container)));
+      grid.append(h('div', { class: `drow ${klass}` }, cellFor('a', m, depth, container, container), cellFor('b', m, depth, container, container)));
       if (container) plainRows(grid, v, path.concat(k), depth + 1, klass, sides, ctx);
     }
     if (i < list.length) grid.append(h('div', { class: 'drow' }, h('div', { class: 'cell', style: `padding-left:${8 + depth * 16}px`, text: `… ${list.length - i} more` }), h('div', { class: 'cell' })));
@@ -770,12 +852,11 @@
       else open = C.open.has(pk);
     }
     const cls = m.status === 'changed' && m.children ? 'container-changed' : m.status;
-    const row = h('div', { class: `drow ${cls}` }, cellFor('a', m, depth, ctx, container, open), cellFor('b', m, depth, ctx, container, open));
+    const row = h('div', { class: `drow ${cls}` }, cellFor('a', m, depth, container, open), cellFor('b', m, depth, container, open));
     row.dataset.pk = pk;
     ctx.rows.set(pk, row);
     if (container) {
-      row.addEventListener('click', (e) => {
-        if (e.target.closest('input,button')) return;
+      row.addEventListener('click', () => {
         if (m.status === 'changed' && m.children) { if (C.closed.has(pk)) C.closed.delete(pk); else C.closed.add(pk); }
         else if (C.open.has(pk)) C.open.delete(pk); else C.open.add(pk);
         renderDiffTree();
@@ -787,7 +868,7 @@
     if (m.children) {
       let hiddenSame = 0;
       for (const c of m.children) {
-        if (hideSame && (c.status === 'same') && m.status === 'changed') { hiddenSame++; continue; }
+        if (hideSame && c.status === 'same' && m.status === 'changed') { hiddenSame++; continue; }
         renderMerged(grid, c, depth + 1, ctx);
       }
       if (hiddenSame) grid.append(h('div', { class: 'drow' }, h('div', { class: 'cell v-sum', style: `padding-left:${8 + (depth + 1) * 16}px`, text: `${plural(hiddenSame, 'unchanged item')} hidden` }), h('div', { class: 'cell' })));
@@ -796,18 +877,20 @@
     else if (m.status === 'removed') plainRows(grid, m.a, m.path, depth + 1, 'removed', 'a', ctx);
   }
 
+  const headerRow = () => h('div', { class: 'hdr' }, h('div', { text: `A${panes.a.name !== 'Untitled' ? ` · ${panes.a.name}` : ''}` }), h('div', { text: `B${panes.b.name !== 'Untitled' ? ` · ${panes.b.name}` : ''}` }));
+
   function renderDiffTree() {
     const body = $('cBody');
     body.replaceChildren();
     const r = C.result;
     if (!r) {
-      const bothEmpty = !C.a.res && !C.b.res;
-      body.append(h('div', { class: 'empty', text: bothEmpty ? 'Paste or open a document on each side to compare them.' : 'Both sides need to be valid before they can be compared.' }));
+      const neither = !panes.a.res && !panes.b.res;
+      body.append(h('div', { class: 'empty', text: neither ? 'Add a document to pane A and to pane B to compare them.' : 'Both panes need valid content before they can be compared.' }));
       return;
     }
     const ctx = { budget: DIFF_BUDGET, over: false, rows: new Map() };
     const grid = h('div', { class: 'dgrid' });
-    body.append(h('div', { class: 'hdr' }, h('div', { text: `A${C.a.name ? ` · ${C.a.name}` : ''}` }), h('div', { text: `B${C.b.name ? ` · ${C.b.name}` : ''}` })), grid);
+    body.append(headerRow(), grid);
     const t0 = performance.now();
     renderMerged(grid, r.root, 0, ctx);
     if (ctx.over) body.append(h('div', { class: 'notice', text: `Showing the first ${DIFF_BUDGET.toLocaleString()} rows. Turn on “hide unchanged”, collapse branches, or use the next/previous buttons to jump between differences.` }));
@@ -819,13 +902,13 @@
     }
   }
 
-  // ---- text diff
   function pruneIgnored(n, test, path) {
     if (n.t === 'obj') {
       n.entries = n.entries.filter((e) => !test(path.concat(e.key)));
       n.entries.forEach((e) => pruneIgnored(e.value, test, path.concat(e.key)));
     } else if (n.t === 'arr') n.items.forEach((v, i) => pruneIgnored(v, test, path.concat(i)));
   }
+
   function renderTextDiff() {
     const body = $('cBody');
     body.replaceChildren();
@@ -834,11 +917,10 @@
     const o = cmpOptions();
     const ig = JSS.diff.compileIgnore(o.ignorePaths);
     const prep = (node) => { const c = JSS.ast.clone(node); if (ig.active) pruneIgnored(c, ig.test, []); return serialize(c, { style: 'json', indent: 2, sortKeys: o.ignoreKeyOrder }).text; };
-    const d = JSS.textdiff.diffLines(prep(C.a.res.node), prep(C.b.res.node));
-    const ctxLines = 3;
+    const d = JSS.textdiff.diffLines(prep(panes.a.res.node), prep(panes.b.res.node));
     const hide = $('cCollapse').checked;
     const keep = new Array(d.rows.length).fill(!hide);
-    if (hide) d.rows.forEach((r, i) => { if (r.kind !== 'eq') for (let j = Math.max(0, i - ctxLines); j <= Math.min(d.rows.length - 1, i + ctxLines); j++) keep[j] = true; });
+    if (hide) d.rows.forEach((r, i) => { if (r.kind !== 'eq') for (let j = Math.max(0, i - 3); j <= Math.min(d.rows.length - 1, i + 3); j++) keep[j] = true; });
     const grid = h('div', { class: 'tdiff' });
     let budget = 8000, skipped = 0, prevChange = false;
     const flush = () => { if (skipped) { grid.append(h('div', { class: 'trow' }, h('div', { class: 'n' }), h('div', { class: 't v-sum', text: `… ${plural(skipped, 'unchanged line')}` }), h('div', { class: 'n' }), h('div', { class: 't' }))); skipped = 0; } };
@@ -852,7 +934,7 @@
       grid.append(row);
     }
     flush();
-    body.append(h('div', { class: 'hdr' }, h('div', { text: `A${C.a.name ? ` · ${C.a.name}` : ''}` }), h('div', { text: `B${C.b.name ? ` · ${C.b.name}` : ''}` })));
+    body.append(headerRow());
     if (d.truncated) body.append(h('div', { class: 'notice', text: 'The documents differ too much for a line-by-line alignment; the changed region is shown as replaced.' }));
     body.append(h('div', { class: 'notice', text: 'Text diff compares the formatted JSON. Case, trim, tolerance and array-mode options apply to the tree diff only.' }), grid);
     $('cPos').textContent = C.cur >= 0 ? `${C.cur + 1} / ${C.blocks.length}` : '';
@@ -861,37 +943,20 @@
   function gotoDiff(delta) {
     const r = C.result;
     if (!r || !r.stats.total) return;
+    const wrap = (cur, n) => ((((cur < 0 ? (delta > 0 ? -1 : 0) : cur) + delta) % n) + n) % n;
     if (C.tab === 'tree') {
-      C.cur = (((C.cur < 0 ? (delta > 0 ? -1 : 0) : C.cur) + delta) % r.diffs.length + r.diffs.length) % r.diffs.length;
+      C.cur = wrap(C.cur, r.diffs.length);
       const path = r.diffs[C.cur].path;
       for (let i = 0; i < path.length; i++) C.closed.delete(pathKey(path.slice(0, i)));
       renderCompare();
     } else {
       if (!C.blocks.length) return;
-      C.cur = (((C.cur < 0 ? (delta > 0 ? -1 : 0) : C.cur) + delta) % C.blocks.length + C.blocks.length) % C.blocks.length;
+      C.cur = wrap(C.cur, C.blocks.length);
       C.blocks.forEach((b) => b.classList.remove('current'));
       C.blocks[C.cur].classList.add('current');
       C.blocks[C.cur].scrollIntoView({ block: 'center' });
       $('cPos').textContent = `${C.cur + 1} / ${C.blocks.length}`;
     }
-  }
-
-  // ---- compare: wiring
-  const scheduleSide = { a: debounce(() => reloadSide('a'), 250), b: debounce(() => reloadSide('b'), 250) };
-  for (const side of ['a', 'b']) {
-    const root = pane(side);
-    root.querySelector('[data-input]').addEventListener('input', () => { scheduleSide[side](); persistSession(); });
-    root.addEventListener('click', async (e) => {
-      const act = e.target.closest('[data-act]');
-      if (!act) return;
-      const ta = root.querySelector('[data-input]');
-      if (act.dataset.act === 'clear') { ta.value = ''; C[side].name = ''; reloadSide(side); persistSession(); }
-      else if (act.dataset.act === 'paste') pasteInto(ta, () => { reloadSide(side); persistSession(); });
-      else if (act.dataset.act === 'open') {
-        try { const f = await pickFile(); ta.value = f.text; C[side].name = f.name; reloadSide(side); persistSession(); }
-        catch (err) { if (err.name !== 'AbortError') { log('error', 'open-failed', { error: String(err) }); toast(`Open failed: ${err.message || err}`, 'error'); } }
-      }
-    });
   }
 
   ['oOrder', 'oArray', 'oArrayKey', 'oIgnore', 'oTol', 'oCase', 'oTrim', 'oMissing'].forEach((id) => {
@@ -906,19 +971,16 @@
   $('cNext').addEventListener('click', () => gotoDiff(1));
   $('cPrev').addEventListener('click', () => gotoDiff(-1));
   $('cSwap').addEventListener('click', () => {
-    const ta = pq('a', '[data-input]'), tb = pq('b', '[data-input]');
-    [ta.value, tb.value] = [tb.value, ta.value];
-    [C.a.name, C.b.name] = [C.b.name, C.a.name];
-    [C.a.res, C.b.res] = [C.b.res, C.a.res];
-    [C.a.text, C.b.text] = [C.b.text, C.a.text];
-    renderSide('a'); renderSide('b');
-    runCompare();
+    const a = panes.a, b = panes.b;
+    for (const k of ['name', 'handle', 'mtime', 'dirty']) [a[k], b[k]] = [b[k], a[k]];
+    [a.input.value, b.input.value] = [b.input.value, a.input.value];
+    a.reload(); b.reload();
     persistSession();
   });
   $('cToggleInputs').addEventListener('click', () => {
-    const box = $('cInputs');
-    box.hidden = !box.hidden;
-    $('cToggleInputs').textContent = box.hidden ? 'Show inputs' : 'Hide inputs';
+    const row = $('paneRow');
+    row.hidden = !row.hidden;
+    $('cToggleInputs').textContent = row.hidden ? 'Show panes' : 'Hide panes';
   });
   $('cCopyPaths').addEventListener('click', () => {
     if (!C.result) return;
@@ -926,7 +988,7 @@
       const pv = (n) => (n ? (n.t === 'obj' || n.t === 'arr' ? JSS.ast.describe(n) : serialize(n, { style: 'json', indent: 0 }).text) : '—');
       return `${d.kind}\t${pathToString(d.path, { root: true })}\tA=${trunc(pv(d.a), 80)}\tB=${trunc(pv(d.b), 80)}`;
     });
-    copyText(lines.join('\n'), `${plural(lines.length, 'difference')}`);
+    copyText(lines.join('\n'), plural(lines.length, 'difference'));
   });
   $('cCopyPatch').addEventListener('click', () => {
     if (!C.result) return;
@@ -935,18 +997,27 @@
     copyText(JSS.diff.toJsonPatch(C.result.diffs), 'JSON Patch');
   });
 
-  // ====================================================================== mode, theme, session
+  // ====================================================================== mode, layout, theme, session
+  function applyLayout() {
+    const effective = prefs.mode === 'compare' ? 2 : prefs.layout;
+    $('paneRow').dataset.layout = String(effective);
+    $('layoutSwitch').hidden = prefs.mode === 'compare';
+    $('layoutSwitch').querySelectorAll('button').forEach((b) => b.classList.toggle('active', Number(b.dataset.layout) === prefs.layout));
+  }
   function setMode(mode) {
     prefs.mode = mode;
     savePrefs();
-    $('viewer').hidden = mode !== 'viewer';
-    $('compare').hidden = mode !== 'compare';
-    document.querySelector('.viewer-only').hidden = mode !== 'viewer';
+    $('stage').dataset.mode = mode;
+    $('cmpPanel').hidden = mode !== 'compare';
+    $('paneRow').hidden = false;
+    $('cToggleInputs').textContent = 'Hide panes';
     $('modeSwitch').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
-    if (mode === 'compare') renderCompare(); else renderViewer();
+    applyLayout();
+    if (mode === 'compare') runCompare();
     persistSession();
   }
   $('modeSwitch').addEventListener('click', (e) => { const b = e.target.closest('[data-mode]'); if (b) setMode(b.dataset.mode); });
+  $('layoutSwitch').addEventListener('click', (e) => { const b = e.target.closest('[data-layout]'); if (b) { prefs.layout = Number(b.dataset.layout); savePrefs(); applyLayout(); } });
 
   const THEMES = ['auto', 'light', 'dark'];
   const darkQuery = matchMedia('(prefers-color-scheme: dark)');
@@ -960,24 +1031,24 @@
 
   function persistSessionNow() {
     const cap = (t) => (t.length > 1500000 ? '' : t);
-    const payload = {
-      viewer: { text: cap(el.vInput.value), name: V.name },
-      a: { text: cap(pq('a', '[data-input]').value), name: C.a.name },
-      b: { text: cap(pq('b', '[data-input]').value), name: C.b.name },
-    };
+    const payload = {};
+    for (const side of ['a', 'b']) payload[side] = { text: cap(panes[side].input.value), name: panes[side].name };
     try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload)); } catch (err) { log('warn', 'session-persist-failed', { error: String(err) }); }
   }
   const persistSession = debounce(persistSessionNow, 500);
   function restoreSession() {
     try {
       const s = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
-      if (!s) return false;
-      el.vInput.value = (s.viewer && s.viewer.text) || ''; V.name = (s.viewer && s.viewer.name) || 'Untitled';
-      pq('a', '[data-input]').value = (s.a && s.a.text) || ''; C.a.name = (s.a && s.a.name) || '';
-      pq('b', '[data-input]').value = (s.b && s.b.text) || ''; C.b.name = (s.b && s.b.name) || '';
+      if (!s) return;
+      for (const side of ['a', 'b']) {
+        const p = s[side] || {};
+        panes[side].input.value = p.text || '';
+        panes[side].name = p.name || 'Untitled';
+        // an empty pane always starts in Raw so there is somewhere to paste
+        if (!p.text) panes[side].view = 'raw';
+      }
       log('info', 'session-restored', {});
-      return true;
-    } catch (err) { log('warn', 'session-restore-failed', { error: String(err) }); return false; }
+    } catch (err) { log('warn', 'session-restore-failed', { error: String(err) }); }
   }
 
   // ====================================================================== drag & drop
@@ -992,8 +1063,8 @@
     dragDepth = 0;
     $('dropOverlay').hidden = true;
     const items = [...e.dataTransfer.items].filter((i) => i.kind === 'file');
-    const target = e.target.closest ? e.target.closest('.cmp-in') : null;
-    log('info', 'drop', { count: items.length, mode: prefs.mode });
+    const targetEl = e.target.closest ? e.target.closest('.docpane') : null;
+    log('info', 'drop', { count: items.length, onPane: targetEl ? targetEl.dataset.pane : null });
     // File handles must be requested synchronously inside the event.
     const pending = items.map((i) => ({ handle: i.getAsFileSystemHandle ? i.getAsFileSystemHandle() : Promise.resolve(null), file: i.getAsFile() }));
     const loaded = [];
@@ -1007,14 +1078,12 @@
       } catch (err) { log('error', 'drop-failed', { error: String(err) }); toast(`Could not read the file: ${err.message || err}`, 'error'); }
     }
     if (!loaded.length) return;
-    if (prefs.mode === 'compare') {
-      const sides = target ? [target.dataset.side] : ['a', 'b'];
-      loaded.slice(0, sides.length).forEach((f, i) => {
-        const side = sides[i];
-        pq(side, '[data-input]').value = f.text; C[side].name = f.name; reloadSide(side);
-      });
-      persistSession();
-    } else setViewerFile(loaded[0]);
+    const twoPanes = prefs.mode === 'compare' || prefs.layout === 2;
+    let order;
+    if (targetEl) { const first = panes[targetEl.dataset.pane]; order = [first, first === panes.a ? panes.b : panes.a]; }
+    else if (twoPanes && loaded.length === 1) order = [panes.a.text.trim() && !panes.b.text.trim() ? panes.b : panes.a];
+    else order = twoPanes ? [panes.a, panes.b] : [panes.a];
+    loaded.slice(0, order.length).forEach((f, i) => order[i].setFile(f));
   });
 
   // ====================================================================== hand-off & boot
@@ -1023,7 +1092,7 @@
     if (data.error) { toast(data.error, 'error'); return; }
     if (typeof data.text === 'string') {
       log('info', 'handoff-received', { chars: data.text.length, source: data.source });
-      setViewerFile({ text: data.text, name: data.name || 'From page' });
+      panes.a.setFile({ text: data.text, name: data.name || 'From page' });
       toast(data.source === 'selection' ? 'Loaded the selected text' : 'Loaded the JSON from the page');
     }
   }
@@ -1037,8 +1106,7 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       if (text.length > MAX_FILE_BYTES) throw new Error('File is larger than the 50 MB limit.');
-      const name = decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || 'document.json');
-      setViewerFile({ text, name });
+      panes.a.setFile({ text, name: decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || 'document.json') });
     } catch (err) {
       log('error', 'open-url-failed', { error: String(err) });
       const allowed = await (window.chrome && chrome.extension && chrome.extension.isAllowedFileSchemeAccess ? chrome.extension.isAllowedFileSchemeAccess() : Promise.resolve(undefined)).catch(() => undefined);
@@ -1049,18 +1117,20 @@
   window.addEventListener('beforeunload', persistSessionNow);
   document.addEventListener('visibilitychange', () => { if (document.hidden) persistSessionNow(); });
   document.addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 's' && prefs.mode === 'viewer') { e.preventDefault(); saveViewer(e.shiftKey); }
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      (activePane || panes.a).save(e.shiftKey);
+    }
   });
 
   (async function boot() {
     log('info', 'boot', {});
-    loadPrefs();
-    V.depth = prefs.depth; V.tab = prefs.tab === 'query' ? 'tree' : prefs.tab; C.tab = prefs.ctab;
-    $('vDepth').value = String(V.depth);
+    C.tab = prefs.ctab;
     const o = prefs.cmp;
     $('oOrder').checked = o.order; $('oArray').value = o.array; $('oArrayKey').value = o.arrayKey; $('oIgnore').value = o.ignore;
     $('oTol').value = o.tol; $('oCase').checked = o.caseI; $('oTrim').checked = o.trim; $('oMissing').checked = o.missing; $('cCollapse').checked = o.collapse;
     $('oArrayKey').hidden = o.array !== 'key';
+    for (const p of Object.values(panes)) p.q('[data-depth]').value = String(p.depth);
     applyTheme();
     restoreSession();
     setMode(prefs.mode);
@@ -1070,7 +1140,9 @@
     const src = params.get('src');
     if (handoffId || src) history.replaceState(null, '', location.pathname);
 
-    await Promise.all([reloadViewer(), reloadSide('a'), reloadSide('b')]);
+    await Promise.all([panes.a.reload(), panes.b.reload()]);
+    // a pane that restored content should show it, not a stale empty-pane view
+    for (const p of Object.values(panes)) if (p.text.trim() && p.view === 'raw' && !prefs.panes[p.side].picked) p.setView('tree', false);
 
     if (handoffId && window.chrome && chrome.storage && chrome.storage.session) {
       try {
