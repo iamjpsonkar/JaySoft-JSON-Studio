@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JSON Studio</title>
+  <link rel="icon" href="icons/icon32.png">
+  <link rel="stylesheet" href="studio.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="icons/icon32.png" alt="" width="22" height="22"><span>JSON Studio</span></div>
+    <div class="segmented" id="modeSwitch" role="group" aria-label="Mode">
+      <button data-mode="viewer">Viewer</button>
+      <button data-mode="compare">Compare</button>
+    </div>
+    <div class="spacer"></div>
+    <span class="status" id="status" role="status" aria-live="polite"></span>
+    <div class="viewer-only">
+      <button class="btn" id="btnOpen" title="Open a file">Open</button>
+      <button class="btn" id="btnSaveAs" title="Save as… (Shift+Ctrl/Cmd+S)">Save as</button>
+      <button class="btn primary" id="btnSave" title="Save (Ctrl/Cmd+S)">Save</button>
+    </div>
+    <button class="btn" id="btnTheme" title="Theme: auto / light / dark">Auto</button>
+  </header>
+
+  <!-- ====================================================== VIEWER -->
+  <main id="viewer" class="mode">
+    <section class="pane in-pane" id="vInPane">
+      <div class="pane-head">
+        <strong>Input</strong>
+        <span class="file-name" id="vName">Untitled</span>
+        <div class="spacer"></div>
+        <button class="tb" id="vPaste" title="Paste from clipboard">Paste</button>
+        <button class="tb" id="vClear" title="Clear">Clear</button>
+        <button class="tb" id="vApply" title="Replace the input with the formatted output">Apply format</button>
+      </div>
+      <div class="info-box" id="vInfo"></div>
+      <textarea id="vInput" spellcheck="false" autocomplete="off" autocapitalize="off"
+        placeholder="Paste JSON, a Python dict, a JS object, stringified JSON, a log line, Base64, a JWT…&#10;or drop a file here."></textarea>
+    </section>
+
+    <section class="pane out-pane">
+      <div class="pane-head">
+        <div class="segmented small" id="vTabs" role="group" aria-label="View">
+          <button data-tab="tree">Tree</button>
+          <button data-tab="formatted">Formatted</button>
+          <button data-tab="query">Query <span id="vQueryCount"></span></button>
+        </div>
+        <div class="spacer"></div>
+        <span class="meta" id="vMeta"></span>
+      </div>
+
+      <div class="toolbar2" id="vBar">
+        <input type="search" id="vSearch" class="field" placeholder="Search keys and values" aria-label="Search">
+        <span class="meta" id="vSearchCount"></span>
+        <button class="tb" id="vPrev" title="Previous match">↑</button>
+        <button class="tb" id="vNext" title="Next match (Enter)">↓</button>
+        <label class="check" title="Show only matching branches"><input type="checkbox" id="vFilter"> filter</label>
+        <span class="sep"></span>
+        <input type="text" id="vQuery" class="field mono" placeholder="JSONPath, e.g. $..items[?(@.price&lt;10)].name" aria-label="JSONPath query" spellcheck="false">
+        <span class="sep"></span>
+        <button class="tb" id="vExpandAll" title="Expand all (limited by the render budget)">Expand</button>
+        <button class="tb" id="vCollapseAll" title="Collapse all">Collapse</button>
+        <select id="vDepth" class="field" title="Expand to depth" aria-label="Expand to depth">
+          <option value="1">depth 1</option><option value="2" selected>depth 2</option><option value="3">depth 3</option>
+          <option value="4">depth 4</option><option value="99">all</option>
+        </select>
+        <button class="tb accent" id="vEmbedded" hidden title="Parse JSON stored inside string values">Expand embedded JSON</button>
+      </div>
+
+      <div class="out-body">
+        <div class="tree" id="vTree" tabindex="0" aria-label="Tree view"></div>
+        <div class="formatted" id="vFormattedBox" hidden>
+          <div class="toolbar2">
+            <label>Format <select id="fStyle" class="field">
+              <option value="auto">Same as input</option><option value="json">JSON</option>
+              <option value="python">Python</option><option value="js">JavaScript / JSON5</option>
+            </select></label>
+            <label>Indent <select id="fIndent" class="field">
+              <option value="2">2 spaces</option><option value="4">4 spaces</option>
+              <option value="tab">Tab</option><option value="0">Minified</option>
+            </select></label>
+            <label class="check"><input type="checkbox" id="fSort"> sort keys</label>
+            <div class="spacer"></div>
+            <span class="meta" id="fNote"></span>
+            <button class="tb" id="fCopy">Copy</button>
+            <button class="tb" id="fDownload">Download</button>
+          </div>
+          <textarea id="vFormatted" readonly spellcheck="false" wrap="off" aria-label="Formatted output"></textarea>
+        </div>
+        <div class="query-results" id="vQueryBox" hidden></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ====================================================== COMPARE -->
+  <main id="compare" class="mode" hidden>
+    <div class="cmp-options" id="cOptions">
+      <label class="check"><input type="checkbox" id="oOrder" checked> ignore key order</label>
+      <label>Arrays
+        <select id="oArray" class="field">
+          <option value="index">by index</option><option value="key">match by key</option><option value="set">unordered (set)</option>
+        </select>
+      </label>
+      <input type="text" id="oArrayKey" class="field" value="id" size="6" title="Key used to match array items" aria-label="Array match key" hidden>
+      <input type="text" id="oIgnore" class="field mono" size="26" placeholder="ignore: updated_at, items[*].ts, /regex/" title="Comma separated: bare name (any depth), $.a.b[0], a.*.id, **.name or /regex/" aria-label="Ignore paths">
+      <label>± <input type="number" id="oTol" class="field" value="0" min="0" step="any" style="width:5.5em" title="Numbers within this distance count as equal"></label>
+      <label class="check"><input type="checkbox" id="oCase"> case-insensitive</label>
+      <label class="check"><input type="checkbox" id="oTrim"> trim strings</label>
+      <label class="check" title="A missing key equals a null value"><input type="checkbox" id="oMissing"> missing = null</label>
+      <div class="spacer"></div>
+      <button class="tb" id="cSwap" title="Swap A and B">⇄ Swap</button>
+      <button class="tb" id="cToggleInputs" title="Show or hide the inputs">Hide inputs</button>
+    </div>
+
+    <div class="cmp-inputs" id="cInputs">
+      <section class="pane cmp-in" data-side="a">
+        <div class="pane-head"><strong>A</strong><span class="file-name" data-name></span><div class="spacer"></div>
+          <button class="tb" data-act="open">Open</button><button class="tb" data-act="paste">Paste</button><button class="tb" data-act="clear">Clear</button></div>
+        <div class="info-box" data-info></div>
+        <textarea data-input spellcheck="false" autocomplete="off" placeholder="Paste or drop the first document (any supported format)"></textarea>
+      </section>
+      <section class="pane cmp-in" data-side="b">
+        <div class="pane-head"><strong>B</strong><span class="file-name" data-name></span><div class="spacer"></div>
+          <button class="tb" data-act="open">Open</button><button class="tb" data-act="paste">Paste</button><button class="tb" data-act="clear">Clear</button></div>
+        <div class="info-box" data-info></div>
+        <textarea data-input spellcheck="false" autocomplete="off" placeholder="Paste or drop the second document (any supported format)"></textarea>
+      </section>
+    </div>
+
+    <div class="cmp-result">
+      <div class="toolbar2" id="cBar">
+        <div class="segmented small" id="cTabs" role="group" aria-label="Compare view">
+          <button data-ctab="tree">Tree diff</button><button data-ctab="text">Text diff</button>
+        </div>
+        <span class="chips" id="cStats"></span>
+        <div class="spacer"></div>
+        <label class="check" title="Collapse unchanged branches"><input type="checkbox" id="cCollapse" checked> hide unchanged</label>
+        <button class="tb" id="cPrev" title="Previous difference">↑</button>
+        <button class="tb" id="cNext" title="Next difference">↓</button>
+        <span class="meta" id="cPos"></span>
+        <button class="tb" id="cCopyPaths" title="Copy the list of differing paths">Copy paths</button>
+        <button class="tb" id="cCopyPatch" title="Copy as RFC 6902 JSON Patch (array mode: by index)">Copy JSON Patch</button>
+      </div>
+      <div class="cmp-body" id="cBody"></div>
+    </div>
+  </main>
+
+  <footer class="statusbar">
+    <span id="stLeft">Ready</span>
+    <div class="spacer"></div>
+    <span id="stRight"></span>
+  </footer>
+
+  <div class="drop-overlay" id="dropOverlay" hidden><div>Drop files to open</div></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="core/ast.js"></script>
+  <script src="core/parser.js"></script>
+  <script src="core/fmt.js"></script>
+  <script src="core/loader.js"></script>
+  <script src="core/diff.js"></script>
+  <script src="core/query.js"></script>
+  <script src="core/textdiff.js"></script>
+  <script src="studio.js"></script>
+</body>
+</html>
