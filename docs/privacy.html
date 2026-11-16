@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JSON Studio – Privacy Policy</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 720px; margin: 48px auto; padding: 0 20px; font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+  h1 { font-size: 1.9rem; margin-bottom: .2em; }
+  h2 { font-size: 1.2rem; margin-top: 2em; }
+  .meta { color: gray; margin-top: 0; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; }
+</style>
+</head>
+<body>
+<h1>JSON Studio – Privacy Policy</h1>
+<p class="meta">Effective 16 November 2026</p>
+
+<p>JSON Studio is a Chrome extension for viewing, formatting, querying and comparing JSON and similar data. It does not collect, transmit, sell or share personal data. It has no servers, accounts, analytics or advertising, and it makes no network requests.</p>
+
+<h2>What the extension reads</h2>
+<ul>
+  <li>When you click the toolbar icon, it reads the active tab once: if the page is a JSON document it reads that text, otherwise it reads your current text selection, if any. Nothing is read in the background or from tabs you did not click on.</li>
+  <li>Local files you open or drop, or that you navigate to as <code>file://</code> URLs ending in <code>.json</code>, <code>.jsonc</code>, <code>.json5</code>, <code>.ndjson</code>, <code>.jsonl</code> or <code>.geojson</code>.</li>
+</ul>
+
+<h2>What is stored, on your device only</h2>
+<ul>
+  <li>The text that is open in each JSON Studio tab, in that tab's session storage, so a reload keeps your work. It is discarded when the tab closes.</li>
+  <li>When the toolbar click passes page text to the new tab, it is held briefly in the browser's in-memory extension session storage and removed as soon as the new tab has read it. It is cleared when the browser exits at the latest.</li>
+  <li>Interface preferences such as theme, output format and compare options, in local storage.</li>
+</ul>
+<p>Nothing is uploaded. Remove stored data by closing the tab, clearing the extension's site data, or removing the extension.</p>
+
+<h2>Permissions</h2>
+<ul>
+  <li><strong>activeTab</strong> and <strong>scripting</strong>: to read the page text or selection of the tab you clicked the icon on.</li>
+  <li><strong>storage</strong>: to pass that text to the new tab and to save preferences.</li>
+  <li><strong>webNavigation</strong> and <strong>access to file URLs</strong>: to open a local JSON file in the studio when you navigate to it. Chrome only grants file access if you enable it for the extension.</li>
+</ul>
+
+<h2>Third parties</h2>
+<p>No data is shared with third parties. All code is bundled in the extension and no remote code is loaded. Parsing never executes the data you load.</p>
+
+<h2>Changes and contact</h2>
+<p>If this policy changes, the updated version will be published at this address with a new effective date.</p>
+<p>Questions: open an issue at <a href="https://github.com/iamjpsonkar/JaySoft-JSON-Studio/issues">github.com/iamjpsonkar/JaySoft-JSON-Studio</a>.</p>
+</body>
+</html>
