@@ -42,17 +42,23 @@ Notes that matter:
 - **Nothing is evaluated.** It is a parser only (no `eval`, no code execution), with a nesting-depth limit.
 - Duplicate keys are kept and reported. Python-only values (tuples, sets, bytes, `Decimal`, `datetime`) are tagged in the tree and converted sensibly when you output JSON.
 
-## Viewer
+## Two panes, each with Raw / Preview / Tree
 
-- **Tree** with type colours, counts, search over keys and values (with next/previous and a "filter" mode), expand/collapse and depth control. Large arrays are paged and the page stays responsive.
-- **Copy** a node's path (`items[7].id`), value or subtree. **Double-click** a value to edit it.
-- **JSONPath** queries (`$..book[?(@.price<10)].title`) with results you can jump to.
-- **Formatted** output as JSON, Python or JavaScript, with indent (2, 4, tab or minified) and sorted keys; copy, download, or apply it back to the input.
-- Open and **save** files with the File System Access API (a warning appears if the file changed on disk).
+The studio has two identical, independent panes (**A** and **B**). Use **1 pane / 2 panes** in the top bar to show one or both.
+
+Every pane can take JSON on its own (paste, **Open**, drag and drop onto it, or the toolbar click for pane A) and has its own view switch:
+
+- **Raw**: the exact text, editable, with live parsing, the "what did the loader do" steps, and **Apply format** to replace the text with the formatted output.
+- **Preview**: read-only, syntax-coloured formatted output as JSON, Python or JavaScript, with indent (2, 4, tab or minified) and sorted keys.
+- **Tree**: collapsible tree with type colours and counts, search over keys and values (next/previous and a "filter" mode), expand/collapse and depth control, **JSONPath** queries, copy of a node's path / value / subtree, and **double-click** to edit a value. Large arrays are paged and the page stays responsive.
+
+Saving, per pane: **Save** and **Save as** write the pane's raw text with the File System Access API (a warning appears if the file changed on disk after you opened it, and invalid text can be saved too). In Preview, **Save formatted…** writes the formatted output and **Download** saves it as a file. `Ctrl/Cmd+S` saves the pane you are working in. Copy buttons are in every view.
+
+An empty pane starts in Raw so there is somewhere to paste. Loading content with Open, Paste or a drop switches it to Tree, unless you have chosen a view for that pane yourself.
 
 ## Compare
 
-Two inputs, each accepting any supported format, so you can compare a Python dict with JSON.
+Compare uses the same two panes, each accepting any supported format, so you can compare a Python dict with JSON. Each pane keeps its own view while you compare, and the diff re-runs as you edit.
 
 - Aligned **tree diff** (added, removed, changed, type changed) and a **text diff**, with next/previous navigation and a swap button.
 - Options: ignore key order (default); arrays **by index**, **matched by a key** (such as `id`) or **unordered**; ignore paths (`updated_at`, `items[*].ts`, `**.name`, `/regex/`); number tolerance; case-insensitive and trimmed strings; "missing equals null".
@@ -75,7 +81,7 @@ npm test
 ```
 
 - `core/`: the parser, loader, serialisers, diff and JSONPath (plain scripts shared by the page, the web worker and the tests)
-- `studio.html|css|js`: the UI, `worker.js`: off-thread parsing, `background.js`: toolbar click and file navigation
+- `studio.html|css|js`: the UI (one `DocPane` class, instantiated twice), `worker.js`: off-thread parsing, `background.js`: toolbar click and file navigation
 - `tests/`: unit tests for the core, the background worker, and the UI in jsdom, plus `tests/samples/`
 
 The UI tests run in jsdom, which has no layout, workers or Chrome APIs (those are stubbed), so visual layout and real-browser behaviour are checked by hand.

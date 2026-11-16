@@ -18,6 +18,7 @@ JSON Studio is a fast, private JSON viewer, formatter and diff tool that runs en
 - Paste almost anything: JSON, JSON5, Python dict/list reprs (True/None/tuples/sets/Decimal/datetime), JavaScript objects, Ruby hashes, PHP arrays
 - Unwraps stringified and multi-layer encoded JSON, finds JSON inside log lines and curl or JSON.parse calls, decodes Base64, gzip+Base64, URL-encoding, HTML entities and JWTs
 - Exact numbers: big integers and decimals never lose digits
+- Two independent panes, each with Raw / Preview / Tree views, and Open / Paste / Save per pane
 - Side-by-side compare with tree and text diff: ignore key order, match arrays by key, ignore paths, number tolerance, JSON Patch export
 - JSONPath queries, search, in-tree editing, format as JSON, Python or JavaScript
 - Large files are parsed off the main thread
