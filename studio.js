@@ -24,6 +24,8 @@
   const DIFF_BUDGET = 6000;
   const WORKER_MIN_CHARS = 200000;
   const VIEWS = ['raw', 'preview', 'tree', 'split'];
+  const SIDES = ['a', 'b', 'c', 'd']; // pane letters, in display order; a pane takes the first free letter
+  const MAX_PANES = SIDES.length;
   const isUntitled = (n) => /^Untitled( \d+)?$/.test(n);
   const PICKER_TYPES = [{
     description: 'JSON / text',
@@ -87,8 +89,8 @@
 
   // ------------------------------------------------------------------ prefs
   const prefs = {
-    theme: 'auto', mode: 'viewer', layout: 2, wrap: true, outline: false, keepDocs: false, split: 0.5, stageSplit: 0.42, syncScroll: false, indent: '2', outStyle: 'auto', sort: false, depth: 2, ctab: 'tree',
-    panes: { a: { view: 'raw', picked: false }, b: { view: 'raw', picked: false } },
+    theme: 'auto', mode: 'viewer', layout: 2, wrap: true, outline: false, keepDocs: false, weights: null, pair: ['a', 'b'], stageSplit: 0.42, syncScroll: false, indent: '2', outStyle: 'auto', sort: false, depth: 2, ctab: 'tree',
+    panes: Object.fromEntries(SIDES.map((x) => [x, { view: 'raw', picked: false }])),
     cmp: { order: true, array: 'index', arrayKey: 'id', ignore: '', tol: 0, caseI: false, trim: false, missing: false, collapse: true },
   };
   function loadPrefs() {
@@ -96,18 +98,22 @@
       const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
       Object.assign(prefs, p, {
         cmp: Object.assign(prefs.cmp, p.cmp || {}),
-        panes: { a: Object.assign(prefs.panes.a, (p.panes || {}).a), b: Object.assign(prefs.panes.b, (p.panes || {}).b) },
+        panes: Object.fromEntries(SIDES.map((x) => [x, Object.assign(prefs.panes[x], (p.panes || {})[x])])),
       });
+      // sizes: one flex weight per pane. Older versions stored a single a|b split ratio.
+      if (!p.weights && Number.isFinite(p.split)) { const r = clampRatio(p.split, 0.5); prefs.weights = { a: r, b: 1 - r }; }
     } catch (err) { log('warn', 'prefs-load-failed', { error: String(err) }); }
     if (!['viewer', 'compare', 'validate'].includes(prefs.mode)) prefs.mode = 'viewer';
-    prefs.split = clampRatio(prefs.split, 0.5);
+    prefs.weights = Object.fromEntries(SIDES.map((x) => [x, prefs.weights && Number(prefs.weights[x]) > 0 ? Number(prefs.weights[x]) : 0.5]));
+    delete prefs.split;
+    prefs.pair = Array.isArray(prefs.pair) && prefs.pair.length === 2 && prefs.pair.every((x) => SIDES.includes(x)) && prefs.pair[0] !== prefs.pair[1] ? prefs.pair : ['a', 'b'];
     prefs.stageSplit = clampRatio(prefs.stageSplit, 0.42);
     prefs.syncScroll = prefs.syncScroll === true;
     prefs.wrap = prefs.wrap !== false;
     prefs.outline = prefs.outline === true;
     prefs.keepDocs = prefs.keepDocs === true && !SHARED_ORIGIN;
     prefs.layout = Number(prefs.layout) === 1 ? 1 : 2;
-    for (const side of ['a', 'b']) if (!VIEWS.includes(prefs.panes[side].view)) prefs.panes[side].view = 'raw';
+    for (const side of SIDES) if (!VIEWS.includes(prefs.panes[side].view)) prefs.panes[side].view = 'raw';
   }
   const savePrefs = () => {
     try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (err) { log('warn', 'prefs-save-failed', { error: String(err) }); }
@@ -375,9 +381,7 @@
   const PREVIEW_MAX = 2000000;
   const TOKEN_RE = /("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')(\s*:)?|\b(?:true|false|null|True|False|None|undefined)\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b|NaN|-?Infinity/g;
   /** Colours tokens with spans built from text nodes (never innerHTML). Plain text beyond HIGHLIGHT_MAX. */
-  function highlightInto(pre, text) {
-    pre.replaceChildren();
-    if (text.length > HIGHLIGHT_MAX) { pre.textContent = text.length > PREVIEW_MAX ? `${text.slice(0, PREVIEW_MAX)}\n… truncated in this view. Copy, Download and Save formatted give the full text.` : text; return; }
+  function highlightFragment(text) {
     const frag = document.createDocumentFragment();
     let last = 0, m;
     TOKEN_RE.lastIndex = 0;
@@ -389,7 +393,12 @@
       last = TOKEN_RE.lastIndex;
     }
     if (last < text.length) frag.append(text.slice(last));
-    pre.append(frag);
+    return frag;
+  }
+  function highlightInto(pre, text) {
+    pre.replaceChildren();
+    if (text.length > HIGHLIGHT_MAX) { pre.textContent = text.length > PREVIEW_MAX ? `${text.slice(0, PREVIEW_MAX)}\n… truncated in this view. Copy, Download and Save formatted give the full text.` : text; return; }
+    pre.append(highlightFragment(text));
   }
 
   /** A small modal form. Resolves to {name: value} on submit, or null when cancelled (Esc, click outside, Cancel). */
@@ -577,12 +586,15 @@
     // ------------------------------------------------------------ keys: Enter, Tab, find
     /** Replace [from,to) with `ins` through the browser's edit stack (keeps native undo), falling back to setRangeText. */
     insert(from, to, ins) {
-      const ta = this.ta;
+      const ta = this.ta, prev = document.activeElement;
+      // execCommand edits the focused element: with the focus in the Find box the replacement text went into that box
+      if (prev !== ta) ta.focus({ preventScroll: true });
       ta.setSelectionRange(from, to);
       if (!(document.execCommand && document.execCommand('insertText', false, ins) && ta.value.slice(from, from + ins.length) === ins)) {
         ta.setRangeText(ins, from, to, 'end');
         ta.dispatchEvent(new Event('input', { bubbles: true }));
       }
+      if (prev && prev !== ta && prev.focus) prev.focus({ preventScroll: true });
     }
     onKey(e) {
       const ta = this.ta, mod = e.ctrlKey || e.metaKey;
@@ -699,11 +711,7 @@
       if (this.ta.readOnly) return toast('This view is a read-only export. Replace in Raw instead.', 'error');
       const r = JSS.find.replaceAll(this.ta.value, this.fb.term.value, this.fb.repl.value, { regex: f.regex, caseSensitive: f.cs });
       if (!r.count) return;
-      this.ta.setSelectionRange(0, this.ta.value.length);
-      if (!(document.execCommand && document.execCommand('insertText', false, r.text) && this.ta.value === r.text)) {
-        this.ta.value = r.text;
-        this.ta.dispatchEvent(new Event('input', { bubbles: true }));
-      }
+      this.insert(0, this.ta.value.length, r.text);
       this.refresh();
       this.runFind(true);
       toast(`Replaced ${r.count.toLocaleString()} ${r.count === 1 ? 'match' : 'matches'}${r.truncated ? ' (the first ' + JSS.find.MAX_MATCHES + ')' : ''}`);
@@ -754,6 +762,7 @@
       this.prevEd = new Editor(this.q('[data-editor="preview"]'), `${side}:preview`);
       this.rawEd.onCaret = this.prevEd.onCaret = () => updateStatus();
       Object.assign(this, {
+        fold: { on: false, folded: new Set(), text: null, info: null }, // the read-only Fold view of the Preview
         docId: newId(), restoreView: null, maxDepth: null, eol: '\n', undo: [], redo: [], selKey: null, // per-document edit history (whole-document snapshots) and the keyboard-selected tree row
         tabs: [null], tab: 0, skipScroll: null, splitSkip: null, renaming: false,
         pvKeep: null, // text typed in the Preview editor; kept as shown (not re-formatted) while it equals the raw text
@@ -818,6 +827,8 @@
           wrap: () => toggleWrap(),
           outline: () => toggleOutline(),
           max: () => setMax(maxSide === this.side ? null : this.side),
+          'close-pane': () => closePane(this.side),
+          fold: () => this.toggleFold(), 'fold-collapse': () => this.foldAll(true), 'fold-expand': () => this.foldAll(false),
           newtab: () => this.newTab(), recent: () => this.showRecent(b),
           prev: () => this.goToMatch(this.idx - 1), next: () => this.goToMatch(this.idx + 1),
           'expand-all': () => this.act_expand(),
@@ -830,15 +841,23 @@
         };
         if (actions[b.dataset.act]) actions[b.dataset.act]();
       });
+      this.q('[data-fold-view]').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-fold]');
+        if (!b) return;
+        const line = Number(b.dataset.fold);
+        if (this.fold.folded.has(line)) this.fold.folded.delete(line); else this.fold.folded.add(line);
+        this.drawFold();
+      });
+      this.q('[data-fold-level]').addEventListener('change', (e) => { if (e.target.value) this.foldAll(true, Number(e.target.value)); });
       this.q('[data-search]').addEventListener('input', () => this.runSearchDebounced());
       this.q('[data-search]').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (this.term) this.goToMatch(this.idx + (e.shiftKey ? -1 : 1)); } });
       this.q('[data-filter]').addEventListener('change', (e) => { this.filter = e.target.checked; this.render(); });
       this.q('[data-query]').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.runQuery(); } });
       this.q('[data-query]').addEventListener('input', (e) => { if (!e.target.value.trim()) this.runQuery(); });
       this.q('[data-depth]').addEventListener('change', (e) => { this.depth = Number(e.target.value); prefs.depth = this.depth; savePrefs(); this.collapsed.clear(); this.expanded.clear(); this.renderTree(); });
-      this.q('[data-f-style]').addEventListener('change', (e) => { panes.a.pvKeep = panes.b.pvKeep = null; prefs.outStyle = e.target.value; savePrefs(); panes.a.refreshPreview(); panes.b.refreshPreview(); });
-      this.q('[data-f-indent]').addEventListener('change', (e) => { panes.a.pvKeep = panes.b.pvKeep = null; prefs.indent = e.target.value; savePrefs(); panes.a.refreshPreview(); panes.b.refreshPreview(); });
-      this.q('[data-f-sort]').addEventListener('change', (e) => { panes.a.pvKeep = panes.b.pvKeep = null; prefs.sort = e.target.checked; savePrefs(); panes.a.refreshPreview(); panes.b.refreshPreview(); });
+      this.q('[data-f-style]').addEventListener('change', (e) => { prefs.outStyle = e.target.value; savePrefs(); formatChanged(); });
+      this.q('[data-f-indent]').addEventListener('change', (e) => { prefs.indent = e.target.value; savePrefs(); formatChanged(); });
+      this.q('[data-f-sort]').addEventListener('change', (e) => { prefs.sort = e.target.checked; savePrefs(); formatChanged(); });
 
       const tree = this.q('[data-tree]');
       tree.addEventListener('click', (e) => this.onTreeClick(e));
@@ -1072,14 +1091,15 @@
       }
       if (this.skipScroll === el) { this.skipScroll = null; return; }
       if (!prefs.syncScroll || this.view !== name) return;
-      const other = panes[this.side === 'a' ? 'b' : 'a'];
-      if (!other) return;
-      const target = other.activeScroller();
-      const t0 = target.scrollTop, l0 = target.scrollLeft;
-      if (t0 === el.scrollTop && l0 === el.scrollLeft) return;
-      target.scrollTop = el.scrollTop; target.scrollLeft = el.scrollLeft;
-      // a scroll event only follows when the position really changed; that echo must not bounce back
-      if (target.scrollTop !== t0 || target.scrollLeft !== l0) other.skipScroll = target;
+      for (const other of orderedPanes()) {
+        if (other === this) continue;
+        const target = other.activeScroller();
+        const t0 = target.scrollTop, l0 = target.scrollLeft;
+        if (t0 === el.scrollTop && l0 === el.scrollLeft) continue;
+        target.scrollTop = el.scrollTop; target.scrollLeft = el.scrollLeft;
+        // a scroll event only follows when the position really changed; that echo must not bounce back
+        if (target.scrollTop !== t0 || target.scrollLeft !== l0) other.skipScroll = target;
+      }
     }
 
     setView(view, byUser) {
@@ -1153,7 +1173,61 @@
 
     refreshPreview() { if (this.view === 'preview') this.renderPreview(); }
 
-    renderPreview() {
+    // ---------------------------------------------------------------- fold view (collapse any block of the formatted preview; read-only)
+    /** Shows the foldable view instead of the editable text when Fold is on (and the document is valid). */
+    renderFold() {
+      const on = this.fold.on && this.ok;
+      this.q('[data-editor="preview"]').hidden = on;
+      this.q('[data-fold-view]').hidden = !on;
+      this.q('[data-act="fold"]').setAttribute('aria-pressed', String(on));
+      for (const sel of ['[data-act="fold-collapse"]', '[data-act="fold-expand"]', '[data-fold-level]']) this.q(sel).hidden = !on;
+      this.q('[data-act="find-preview"]').disabled = !this.ok || on;
+      if (!on) return;
+      const text = this.pinput.value;
+      if (text !== this.fold.text) { this.fold.text = text; this.fold.folded = new Set(); this.fold.info = JSS.folding.foldRanges(text); } // other text: other lines, start open
+      this.drawFold();
+    }
+    drawFold() {
+      const view = this.q('[data-fold-view]'), { info, folded } = this.fold;
+      const keep = view.scrollTop;
+      const rows = JSS.folding.visibleRows(info.lines.length, folded, info.ranges);
+      const CAP = 20000;
+      const frag = document.createDocumentFragment();
+      for (const r of rows.slice(0, CAP)) {
+        const range = info.ranges.get(r.line);
+        const text = h('span', { class: 'fl-t' });
+        text.append(highlightFragment(info.lines[r.line]));
+        if (r.folded) {
+          text.append(h('button', { class: 'fold-ellipsis', type: 'button', 'data-fold': String(r.line), title: `${plural(range.count + 1, 'line')} hidden: click to expand`, text: `… ${plural(range.count, 'line')}` }), highlightFragment(info.lines[r.end].trim()));
+        }
+        frag.append(h('div', { class: 'fl', role: 'treeitem', 'aria-expanded': range ? String(!r.folded) : null },
+          h('span', { class: 'fl-n', text: String(r.line + 1) }),
+          range ? h('button', { class: 'fold-arrow', type: 'button', 'data-fold': String(r.line), 'aria-label': `${r.folded ? 'Expand' : 'Collapse'} the block starting on line ${r.line + 1}`, title: r.folded ? 'Expand this block' : 'Collapse this block', text: r.folded ? '▸' : '▾' }) : h('span', { class: 'fold-sp' }),
+          text));
+      }
+      if (rows.length > CAP) frag.append(h('div', { class: 'notice', text: `Showing the first ${CAP.toLocaleString()} lines. Collapse blocks to see the rest, or use Copy / Download for the full text.` }));
+      view.replaceChildren(frag);
+      view.scrollTop = keep;
+      this.q('[data-f-note]').textContent = `Fold view, read-only: ${folded.size ? plural(folded.size, 'block') + ' collapsed' : 'all blocks open'}. Click Fold again to edit.`;
+    }
+    toggleFold() {
+      if (!this.ok) return toast('Fix the error shown above first: folding needs a valid document.', 'error');
+      if (!this.fold.on && !JSS.folding.foldRanges(this.pinput.value).ranges.size) return toast('Nothing to fold: this text has no multi-line blocks. Choose a pretty-printed format (not Minified, YAML or CSV).');
+      this.fold.on = !this.fold.on;
+      log('info', 'fold-view', { pane: this.side, on: this.fold.on });
+      this.renderFold();
+    }
+    /** Collapse (or expand) every block, or keep `level` levels open. */
+    foldAll(collapse, level) {
+      if (!this.fold.on || !this.fold.info) return;
+      const { ranges } = this.fold.info;
+      this.fold.folded = level ? JSS.folding.collapseToLevel(ranges, level) : collapse ? new Set(ranges.keys()) : new Set();
+      this.drawFold();
+    }
+
+    renderPreview() { this.renderPreviewText(); this.renderFold(); }
+
+    renderPreviewText() {
       this.q('[data-f-style]').value = prefs.outStyle; this.q('[data-f-indent]').value = prefs.indent; this.q('[data-f-sort]').checked = prefs.sort;
       const ta = this.pinput;
       const conv = this.converter();
@@ -1742,26 +1816,34 @@
     if (activePane === p) return;
     activePane = p;
     Object.values(panes).forEach((x) => x.root.classList.toggle('active', x === p));
+    renderPaneChips();
     updateStatus();
   }
 
   loadPrefs();
-  for (const side of ['a', 'b']) {
-    panes[side] = new DocPane(side);
-    $('paneRow').append(panes[side].root);
-    panes[side].onResult = () => { if (prefs.mode === 'compare') scheduleCompare(); else if (prefs.mode === 'validate') scheduleValidate(); };
+  const orderedPanes = () => SIDES.filter((x) => panes[x]).map((x) => panes[x]);
+  const firstPane = () => orderedPanes()[0];
+  /** The panes on screen: all of them, or only the one being worked in when the layout is "1 pane". */
+  const visiblePanes = () => (prefs.mode === 'viewer' && prefs.layout === 1 && orderedPanes().length > 1 ? [activePane && panes[activePane.side] ? activePane : firstPane()] : orderedPanes());
+
+  function createPane(side) {
+    const p = new DocPane(side);
+    panes[side] = p;
+    p.q('[data-depth]').value = String(p.depth);
+    p.onResult = () => { if (prefs.mode === 'compare') scheduleCompare(); else if (prefs.mode === 'validate') scheduleValidate(); };
+    return p;
   }
-  setActive(panes.a);
 
   // ====================================================================== resizing, maximise, synced scrolling
-  const paneSplit = h('div', { class: 'vsplit', id: 'paneSplit', role: 'separator', 'aria-orientation': 'vertical', tabindex: '0', title: 'Drag to resize; double-click to reset', 'aria-label': 'Resize panes' });
-  $('paneRow').insertBefore(paneSplit, panes.b.root);
-
-  function applyRatios() {
-    panes.a.root.style.flex = `${prefs.split} 1 0`;
-    panes.b.root.style.flex = `${1 - prefs.split} 1 0`;
-    paneSplit.setAttribute('aria-valuenow', String(Math.round(prefs.split * 100)));
+  function equalWeights() { const n = orderedPanes().length || 1; for (const x of SIDES) prefs.weights[x] = 1 / n; }
+  function applyWeights() {
+    for (const p of orderedPanes()) p.root.style.flex = `${prefs.weights[p.side]} 1 0`;
+    for (const d of document.querySelectorAll('#paneRow .vsplit')) {
+      const [l, r] = d.dataset.between.split(',');
+      d.setAttribute('aria-valuenow', String(Math.round((100 * prefs.weights[l]) / (prefs.weights[l] + prefs.weights[r]))));
+    }
   }
+  function applyRatios() { applyWeights(); }
   function applyStage() {
     const row = $('paneRow'), split = $('stageSplit');
     const stacked = prefs.mode !== 'viewer';
@@ -1794,22 +1876,126 @@
       savePrefs();
     });
   }
-  makeSplitter(paneSplit, {
-    ratioFrom: (e) => { const r = $('paneRow').getBoundingClientRect(); return (e.clientX - r.left) / (r.width || 1); },
-    get: () => prefs.split, set: (v) => { prefs.split = v; applyRatios(); }, reset: () => { prefs.split = 0.5; applyRatios(); }, dec: 'ArrowLeft', inc: 'ArrowRight',
-  });
   makeSplitter($('stageSplit'), {
     ratioFrom: (e) => { const r = $('stage').getBoundingClientRect(); return (e.clientY - r.top) / (r.height || 1); },
     get: () => prefs.stageSplit, set: (v) => { prefs.stageSplit = v; applyStage(); }, reset: () => { prefs.stageSplit = 0.42; applyStage(); }, dec: 'ArrowUp', inc: 'ArrowDown',
   });
+  /** The draggable divider between two neighbouring panes: it moves size between those two only. */
+  function makeDivider(l, r, index) {
+    const d = h('div', { class: 'vsplit', id: `paneSplit${index ? index + 1 : ''}`, role: 'separator', 'aria-orientation': 'vertical', tabindex: '0', title: 'Drag to resize; double-click to reset', 'aria-label': `Resize panes ${l.toUpperCase()} and ${r.toUpperCase()}` });
+    d.dataset.between = `${l},${r}`;
+    const total = () => prefs.weights[l] + prefs.weights[r];
+    makeSplitter(d, {
+      ratioFrom: (e) => { const a = panes[l].root.getBoundingClientRect(), b = panes[r].root.getBoundingClientRect(); return (e.clientX - a.left) / ((b.right - a.left) || 1); },
+      get: () => prefs.weights[l] / total(),
+      set: (v) => { const t = total(); prefs.weights[l] = v * t; prefs.weights[r] = (1 - v) * t; applyWeights(); },
+      reset: () => { const t = total(); prefs.weights[l] = prefs.weights[r] = t / 2; applyWeights(); },
+      dec: 'ArrowLeft', inc: 'ArrowRight',
+    });
+    return d;
+  }
+  /** (Re)lays out the pane row: panes in letter order with a divider between each neighbouring pair. */
+  function rebuildPaneRow() {
+    const row = $('paneRow');
+    for (const d of [...row.querySelectorAll('.vsplit')]) d.remove();
+    const list = orderedPanes();
+    list.forEach((p, i) => { row.append(p.root); if (i < list.length - 1) row.append(makeDivider(p.side, list[i + 1].side, i)); });
+    applyWeights();
+    applyLayout();
+    fillPairSelects();
+  }
+  function renderPaneChips() {
+    const box = $('paneChips'), list = orderedPanes();
+    box.hidden = list.length < 2 || prefs.mode !== 'viewer';
+    box.replaceChildren(...list.map((p) => h('button', { 'data-chip': p.side, class: p === activePane ? 'active' : null, title: `Go to pane ${p.label()}`, text: p.label(), onclick: () => {
+      setActive(p);
+      (p.view === 'raw' || p.view === 'split' ? p.input : p.view === 'preview' ? p.pinput : p.q('[data-tree]')).focus();
+    } })));
+  }
+
+  // ---------------------------------------------------------------- adding and closing panes
+  function addPane() {
+    const side = SIDES.find((x) => !panes[x]);
+    if (!side) { toast(`You can have up to ${MAX_PANES} panes.`); return null; }
+    const p = createPane(side);
+    equalWeights();
+    if (prefs.mode === 'viewer' && prefs.layout === 1) { prefs.layout = 2; savePrefs(); } // "1 pane" would hide the new pane
+    rebuildPaneRow();
+    applyWrap();
+    p.reload();
+    setActive(p);
+    p.input.focus();
+    persistSession();
+    log('info', 'pane-added', { pane: side, panes: orderedPanes().length });
+    return p;
+  }
+  function closePane(side) {
+    const p = panes[side];
+    if (!p) return;
+    if (orderedPanes().length < 2) return toast('At least one pane stays open.');
+    p.snapshot();
+    const docs = p.tabs.filter((d) => d && d.text.trim()).length;
+    if (docs && !confirm(`Close pane ${p.label()}? Its ${plural(docs, 'document')} will be closed.`)) return;
+    for (const d of p.tabs) if (d && d.handle) handleStore.remove(d.id); // forget the files these documents were linked to
+    const wasActive = activePane === p;
+    p.root.remove();
+    delete panes[side];
+    if (maxSide === side) setMax(null);
+    if (wasActive) { activePane = null; setActive(firstPane()); }
+    equalWeights();
+    rebuildPaneRow();
+    persistSession();
+    if (prefs.mode === 'compare') runCompare(); else if (prefs.mode === 'validate') runValidate();
+    log('info', 'pane-closed', { pane: side, panes: orderedPanes().length });
+    toast(`Closed pane ${side.toUpperCase()}`);
+  }
+  $('btnAddPane').addEventListener('click', () => addPane());
+
+  // ---------------------------------------------------------------- which two panes Compare and Validate use
+  function cmpPair() {
+    const ids = SIDES.filter((x) => panes[x]);
+    let [l, r] = prefs.pair;
+    if (!panes[l]) l = ids.find((x) => x !== r) || ids[0];
+    if (!panes[r] || r === l) r = ids.find((x) => x !== l);
+    return [panes[l] || null, r ? panes[r] : null];
+  }
+  function fillPairSelects() {
+    const [L, R] = cmpPair();
+    const label = (p) => `${p.label()}${isUntitled(p.name) ? '' : ` · ${trunc(p.name, 24)}`}`;
+    for (const [id, chosen] of [['cLeft', L], ['cRight', R], ['vData', L], ['vSchemaPane', R]]) {
+      const sel = $(id);
+      sel.replaceChildren(...orderedPanes().map((p) => h('option', { value: p.side, selected: p === chosen, text: label(p) })));
+      sel.disabled = orderedPanes().length < 2;
+    }
+  }
+  function setPair(left, right) {
+    const others = SIDES.filter((x) => panes[x]);
+    if (left === right) { if (left === prefs.pair[0]) left = others.find((x) => x !== right); else right = others.find((x) => x !== left); }
+    prefs.pair = [left, right];
+    savePrefs();
+    fillPairSelects();
+    if (prefs.mode === 'compare') runCompare(); else if (prefs.mode === 'validate') runValidate();
+  }
+  for (const [id, which] of [['cLeft', 0], ['cRight', 1], ['vData', 0], ['vSchemaPane', 1]]) {
+    $(id).addEventListener('change', (e) => { const [L, R] = cmpPair(); setPair(...(which === 0 ? [e.target.value, R && R.side] : [L && L.side, e.target.value])); });
+  }
+  function formatChanged() { for (const p of orderedPanes()) { p.pvKeep = null; p.refreshPreview(); } }
 
   function setMax(side) {
     maxSide = side;
     const row = $('paneRow');
     if (side) row.dataset.max = side; else delete row.dataset.max;
-    for (const p of Object.values(panes)) p.q('[data-act="max"]').setAttribute('aria-pressed', String(p.side === side));
+    for (const p of orderedPanes()) {
+      p.root.classList.toggle('maxed', p.side === side);
+      p.q('[data-act="max"]').setAttribute('aria-pressed', String(p.side === side));
+    }
     log('info', 'maximise', { pane: side });
   }
+
+  createPane('a');
+  createPane('b');
+  rebuildPaneRow();
+  setActive(panes.a);
 
   function applyWrap() {
     for (const p of Object.values(panes)) { p.rawEd.setWrap(prefs.wrap); p.prevEd.setWrap(prefs.wrap); }
@@ -1859,7 +2045,9 @@
   const scheduleCompare = debounce(() => runCompare(), 200);
 
   function runCompare() {
-    const a = panes.a.res, b = panes.b.res;
+    fillPairSelects();
+    const [L, R] = cmpPair();
+    const a = L && L.res, b = R && R.res;
     if (!(a && a.ok && b && b.ok)) { C.result = null; C.cur = -1; renderCompare(); return; }
     const t0 = performance.now();
     C.result = JSS.diff.compare(a.node, b.node, cmpOptions());
@@ -1962,15 +2150,20 @@
     else if (m.status === 'removed') plainRows(grid, m.a, m.path, depth + 1, 'removed', 'a', ctx);
   }
 
-  const headerRow = () => h('div', { class: 'hdr' }, h('div', { text: `A${!isUntitled(panes.a.name) ? ` · ${panes.a.name}` : ''}` }), h('div', { text: `B${!isUntitled(panes.b.name) ? ` · ${panes.b.name}` : ''}` }));
+  const headerRow = () => {
+    const [L, R] = cmpPair();
+    const head = (p) => (p ? `${p.label()}${!isUntitled(p.name) ? ` · ${p.name}` : ''}` : '—');
+    return h('div', { class: 'hdr' }, h('div', { text: head(L) }), h('div', { text: head(R) }));
+  };
 
   function renderDiffTree() {
     const body = $('cBody');
     body.replaceChildren();
     const r = C.result;
     if (!r) {
-      const neither = !panes.a.res && !panes.b.res;
-      body.append(h('div', { class: 'empty', text: neither ? 'Add a document to pane A and to pane B to compare them.' : 'Both panes need valid content before they can be compared.' }));
+      const [L, R] = cmpPair();
+      const neither = !(L && L.res) && !(R && R.res);
+      body.append(h('div', { class: 'empty', text: !R ? 'Add a second pane (the + Pane button) to compare two documents.' : neither ? `Add a document to pane ${L.label()} and to pane ${R.label()} to compare them.` : 'Both panes need valid content before they can be compared.' }));
       return;
     }
     const ctx = { budget: DIFF_BUDGET, over: false, rows: new Map() };
@@ -2002,7 +2195,8 @@
     const o = cmpOptions();
     const ig = JSS.diff.compileIgnore(o.ignorePaths);
     const prep = (node) => { const c = JSS.ast.clone(node); if (ig.active) pruneIgnored(c, ig.test, []); return serialize(c, { style: 'json', indent: 2, sortKeys: o.ignoreKeyOrder }).text; };
-    const d = JSS.textdiff.diffLines(prep(panes.a.res.node), prep(panes.b.res.node));
+    const [pl, pr] = cmpPair();
+    const d = JSS.textdiff.diffLines(prep(pl.res.node), prep(pr.res.node));
     const hide = $('cCollapse').checked;
     const keep = new Array(d.rows.length).fill(!hide);
     if (hide) d.rows.forEach((r, i) => { if (r.kind !== 'eq') for (let j = Math.max(0, i - 3); j <= Math.min(d.rows.length - 1, i + 3); j++) keep[j] = true; });
@@ -2056,7 +2250,8 @@
   $('cNext').addEventListener('click', () => gotoDiff(1));
   $('cPrev').addEventListener('click', () => gotoDiff(-1));
   function swapPanes() {
-    const a = panes.a, b = panes.b;
+    const [a, b] = cmpPair();
+    if (!a || !b) return toast('Add a second pane to swap documents between panes.');
     for (const k of ['docId', 'name', 'handle', 'mtime', 'dirty', 'undo', 'redo', 'eol']) [a[k], b[k]] = [b[k], a[k]];
     [a.input.value, b.input.value] = [b.input.value, a.input.value];
     a.pvKeep = b.pvKeep = null; a.selKey = b.selKey = null;
@@ -2093,13 +2288,18 @@
   const scheduleValidate = debounce(() => runValidate(), 250);
 
   function runValidate() {
-    const a = panes.a.res, b = panes.b.res;
+    fillPairSelects();
+    const [L, R] = cmpPair();
+    const a = L && L.res, b = R && R.res;
+    const ln = L ? L.label() : 'A', rn = R ? R.label() : 'B';
     VAL.result = null;
-    if (!(a && a.ok && b && b.ok)) {
-      VAL.note = !a && !b ? 'Put the document in pane A and a JSON Schema in pane B.' : 'Both panes need valid content before A can be validated against B.';
+    if (!R) {
+      VAL.note = 'Add a second pane (the + Pane button): one holds the document, the other the JSON Schema.';
+    } else if (!(a && a.ok && b && b.ok)) {
+      VAL.note = !a && !b ? `Put the document in pane ${ln} and a JSON Schema in pane ${rn}.` : `Both panes need valid content before ${ln} can be validated against ${rn}.`;
     } else {
       let schema;
-      try { schema = JSON.parse(serialize(b.node, { style: 'json', indent: 0, nonFinite: 'null' }).text); } catch (err) { schema = undefined; VAL.note = `Pane B cannot be used as a schema: ${err.message}`; }
+      try { schema = JSON.parse(serialize(b.node, { style: 'json', indent: 0, nonFinite: 'null' }).text); } catch (err) { schema = undefined; VAL.note = `Pane ${rn} cannot be used as a schema: ${err.message}`; }
       if (schema !== undefined) {
         if (schema === null || (typeof schema !== 'object' && typeof schema !== 'boolean')) VAL.note = 'A JSON Schema must be an object (or true / false).';
         else {
@@ -2117,30 +2317,42 @@
     const stats = $('vStats'), body = $('vBody');
     stats.replaceChildren(); body.replaceChildren();
     const r = VAL.result;
-    if (!r) { body.append(h('div', { class: 'empty', text: VAL.note || 'Put the document in pane A and a JSON Schema in pane B.' })); return; }
+    const [vL, vR] = cmpPair();
+    if (!r) { body.append(h('div', { class: 'empty', text: VAL.note || 'Put the document in one pane and a JSON Schema in another.' })); return; }
     stats.append(r.valid ? h('span', { class: 'chip ok', text: 'Valid' }) : h('span', { class: 'chip del', text: `${plural(r.errors.length, 'error')}${r.truncated ? '+' : ''}` }));
     if (r.ignored.length) stats.append(h('span', { class: 'chip warn', title: 'These keywords are not checked by this validator', text: `not checked: ${r.ignored.join(', ')}` }));
-    if (r.valid) body.append(h('div', { class: 'empty', text: 'A conforms to the schema in B.' }));
+    if (r.valid) body.append(h('div', { class: 'empty', text: `${vL.label()} conforms to the schema in ${vR.label()}.` }));
     for (const e of r.errors) {
-      const row = h('div', { class: 'v-row', title: 'Show in the tree of A' }, h('span', { class: 'v-path', text: pathToString(e.path, { root: true }) }), h('span', { class: 'chip typ', text: e.keyword }), h('span', { class: 'v-msg', text: e.message }));
-      row.addEventListener('click', () => { panes.a.reveal(e.path); setActive(panes.a); });
+      const row = h('div', { class: 'v-row', title: `Show in the tree of ${vL.label()}` }, h('span', { class: 'v-path', text: pathToString(e.path, { root: true }) }), h('span', { class: 'chip typ', text: e.keyword }), h('span', { class: 'v-msg', text: e.message }));
+      row.addEventListener('click', () => { vL.reveal(e.path); setActive(vL); });
       body.append(row);
     }
     if (r.truncated) body.append(h('div', { class: 'notice', text: 'Showing the first 500 errors.' }));
   }
   $('vInfer').addEventListener('click', () => {
-    if (!panes.a.ok) return toast('Pane A needs valid content to infer a schema from.', 'error');
-    panes.b.setFile({ text: JSS.convert.toJsonSchema(panes.a.res.node), name: 'schema.json' });
-    toast('Inferred a schema from A into B. Tighten it (formats, minimums, enums) to make validation meaningful.');
+    const [src, dst] = cmpPair();
+    if (!dst) return toast('Add a second pane first: the schema is written there.', 'error');
+    if (!src.ok) return toast(`Pane ${src.label()} needs valid content to infer a schema from.`, 'error');
+    dst.setFile({ text: JSS.convert.toJsonSchema(src.res.node), name: 'schema.json' });
+    toast(`Inferred a schema from ${src.label()} into ${dst.label()}. Tighten it (formats, minimums, enums) to make validation meaningful.`);
     log('info', 'schema-inferred', {});
   });
 
   // ====================================================================== mode, layout, theme, session
   function applyLayout() {
+    const count = orderedPanes().length;
     const effective = prefs.mode !== 'viewer' ? 2 : prefs.layout;
-    $('paneRow').dataset.layout = String(effective);
-    $('layoutSwitch').hidden = prefs.mode !== 'viewer';
+    const row = $('paneRow');
+    row.dataset.layout = String(effective);
+    row.dataset.count = String(count);
+    $('layoutSwitch').hidden = prefs.mode !== 'viewer' || count < 2;
+    $('layoutSwitch').querySelector('[data-layout="2"]').textContent = `${Math.max(2, count)} panes`;
     $('layoutSwitch').querySelectorAll('button').forEach((b) => b.classList.toggle('active', Number(b.dataset.layout) === prefs.layout));
+    for (const p of orderedPanes()) p.q('[data-act="close-pane"]').hidden = count < 2;
+    const add = $('btnAddPane');
+    add.disabled = count >= MAX_PANES;
+    add.title = count >= MAX_PANES ? `Up to ${MAX_PANES} panes` : `Add another pane (up to ${MAX_PANES}), each with its own documents`;
+    renderPaneChips();
   }
   function setMode(mode) {
     prefs.mode = mode;
@@ -2178,11 +2390,10 @@
       id: d.id, text: cap(d.text), name: d.name, view: d.view, eol: d.eol, hasHandle: Boolean(d.handle), mtime: d.mtime || 0, dirty: Boolean(d.dirty),
       sel: d.sel || [0, 0], scroll: d.scroll || 0,
     });
-    const payload = {};
-    for (const side of ['a', 'b']) {
-      const p = panes[side];
+    const payload = { ids: orderedPanes().map((p) => p.side) };
+    for (const p of orderedPanes()) {
       p.snapshot();
-      payload[side] = Object.assign(entry(p.tabs[p.tab]), { tab: p.tab, tabs: p.tabs.map(entry) });
+      payload[p.side] = Object.assign(entry(p.tabs[p.tab]), { tab: p.tab, tabs: p.tabs.map(entry) });
     }
     const json = JSON.stringify(payload);
     try { sessionStorage.setItem(SESSION_KEY, json); } catch (err) { log('warn', 'session-persist-failed', { error: String(err) }); }
@@ -2218,7 +2429,14 @@
       if (!raw && prefs.keepDocs) { raw = localStorage.getItem(RECOVER_KEY); source = 'kept'; }
       const s = JSON.parse(raw || 'null');
       if (!s) return;
-      for (const side of ['a', 'b']) {
+      // which panes this tab had (older sessions have just a and b)
+      let ids = (Array.isArray(s.ids) ? s.ids : SIDES.filter((x) => s[x])).filter((x, i, arr) => SIDES.includes(x) && arr.indexOf(x) === i);
+      if (!ids.length) ids = ['a', 'b'];
+      const changed = ids.length !== orderedPanes().length || ids.some((x) => !panes[x]);
+      for (const x of SIDES) { if (panes[x] && !ids.includes(x)) { panes[x].root.remove(); delete panes[x]; } }
+      for (const x of ids) if (!panes[x]) createPane(x);
+      if (changed) { equalWeights(); rebuildPaneRow(); applyWrap(); if (!panes[activePane && activePane.side]) setActive(firstPane()); }
+      for (const side of ids) {
         const p = s[side] || {};
         const docs = (Array.isArray(p.tabs) && p.tabs.length ? p.tabs : [p]).map(toDoc);
         const pane = panes[side];
@@ -2249,7 +2467,7 @@
 
   // ====================================================================== status bar (position, selection, path, document stats, line ending)
   function updateStatusNow() {
-    const p = activePane || panes.a;
+    const p = activePane || firstPane();
     const L = p.label();
     // caret / selection of the editor in use
     let pos = '';
@@ -2275,7 +2493,7 @@
   }
   function updateStatus() { clearTimeout(statusTimer); statusTimer = setTimeout(updateStatusNow, 40); }
   $('stEol').addEventListener('click', () => {
-    const p = activePane || panes.a;
+    const p = activePane || firstPane();
     p.eol = p.eol === '\r\n' ? '\n' : '\r\n';
     if (p.input.value) { p.dirty = true; p.render(); persistSession(); }
     log('info', 'eol-changed', { pane: p.side, eol: p.eol === '\r\n' ? 'crlf' : 'lf' });
@@ -2292,7 +2510,7 @@
     for (const p of Object.values(panes)) { p.pvKeep = null; p.refreshPreview(); }
   }
   function paletteCommands() {
-    const p = activePane || panes.a;
+    const p = activePane || firstPane();
     const L = p.label();
     const hasText = Boolean(p.input.value);
     const cmds = [];
@@ -2310,6 +2528,10 @@
     add(`${L}: copy formatted output`, () => { if (p.view !== 'preview') p.setView('preview', true); copyText(p.fmtText, 'formatted output'); }, { hint: 'copy', enabled: p.ok });
     add(prefs.wrap ? 'Word wrap: turn off' : 'Word wrap: turn on', toggleWrap, { hint: 'view' });
     add(prefs.outline ? 'Outline: hide' : 'Outline: show', toggleOutline, { hint: 'view' });
+    const toPreview = () => { if (p.view !== 'preview') p.setView('preview', true); };
+    add(`${L}: fold view ${p.fold.on ? 'off (edit the preview)' : 'on (collapse blocks in the preview)'}`, () => { toPreview(); p.toggleFold(); }, { hint: 'preview', enabled: p.ok });
+    add(`${L}: fold view: collapse all blocks`, () => { toPreview(); if (!p.fold.on) p.toggleFold(); p.foldAll(true); }, { hint: 'preview', enabled: p.ok });
+    add(`${L}: fold view: expand all blocks`, () => { toPreview(); if (!p.fold.on) p.toggleFold(); p.foldAll(false); }, { hint: 'preview', enabled: p.ok });
     add(`${L}: find and replace`, () => { if (p.view === 'tree') p.setView('raw', true); (p.view === 'preview' ? p.prevEd : p.rawEd).openFind(); }, { hint: 'Ctrl/Cmd+F' });
     add(`${L}: undo edit`, () => p.undoEdit(), { hint: 'Ctrl/Cmd+Z in tree', enabled: p.undo.length > 0 });
     add(`${L}: redo edit`, () => p.redoEdit(), { hint: 'Ctrl/Cmd+Shift+Z', enabled: p.redo.length > 0 });
@@ -2323,10 +2545,14 @@
     add(`${L}: previous document tab`, () => p.stepTab(-1), { hint: 'tabs', enabled: p.tabs.length > 1 });
     add(maxSide === p.side ? `${L}: restore size` : `${L}: maximise`, () => setMax(maxSide === p.side ? null : p.side), { hint: 'layout' });
     for (const [m, name] of [['viewer', 'Viewer'], ['compare', 'Compare'], ['validate', 'Validate against schema']]) add(`Mode: ${name}`, () => setMode(m), { hint: 'mode', enabled: prefs.mode !== m });
-    add('Layout: one pane', () => { prefs.layout = 1; savePrefs(); applyLayout(); }, { hint: 'layout', enabled: prefs.layout !== 1 });
-    add('Layout: two panes', () => { prefs.layout = 2; savePrefs(); applyLayout(); }, { hint: 'layout', enabled: prefs.layout !== 2 });
-    add('Layout: reset pane sizes', () => { prefs.split = 0.5; prefs.stageSplit = 0.42; applyRatios(); applyStage(); savePrefs(); }, { hint: 'layout' });
-    add('Swap A and B', swapPanes, { hint: 'panes' });
+    const count = orderedPanes().length;
+    add('Layout: one pane (the one you are in)', () => { prefs.layout = 1; savePrefs(); applyLayout(); }, { hint: 'layout', enabled: count > 1 && prefs.layout !== 1 });
+    add(`Layout: all ${count} panes side by side`, () => { prefs.layout = 2; savePrefs(); applyLayout(); }, { hint: 'layout', enabled: count > 1 && prefs.layout !== 2 });
+    add('Layout: reset pane sizes', () => { equalWeights(); prefs.stageSplit = 0.42; applyWeights(); applyStage(); savePrefs(); }, { hint: 'layout' });
+    add('Add pane', addPane, { hint: 'panes', enabled: count < MAX_PANES });
+    add(`Close pane ${p.label()}`, () => closePane(p.side), { hint: 'panes', enabled: count > 1 });
+    for (const q of orderedPanes()) if (q !== p) add(`Go to pane ${q.label()}`, () => { setActive(q); }, { hint: 'panes' });
+    add('Swap the two compared panes', swapPanes, { hint: 'panes', enabled: count > 1 });
     add(prefs.syncScroll ? 'Turn off synced scrolling' : 'Turn on synced scrolling', () => $('btnSync').click(), { hint: 'panes' });
     add(prefs.keepDocs ? 'Keep my documents between visits: turn off (erases the stored copy)' : 'Keep my documents between visits: turn on', () => setKeepDocs(!prefs.keepDocs), { hint: 'privacy' });
     add('Theme: cycle auto / light / dark', () => $('btnTheme').click(), { hint: 'theme' });
@@ -2411,12 +2637,13 @@
       } catch (err) { log('error', 'drop-failed', { error: String(err) }); toast(`Could not open the file: ${err.message || err}`, 'error'); }
     }
     if (!loaded.length) return;
-    const twoPanes = prefs.mode === 'compare' || prefs.layout === 2;
+    // dropped on a pane: that pane first; one file: the first empty visible pane; several: one pane each, the rest as extra tabs in the last pane
+    const visible = visiblePanes();
     let order;
-    if (targetEl) { const first = panes[targetEl.dataset.pane]; order = [first, first === panes.a ? panes.b : panes.a]; }
-    else if (twoPanes && loaded.length === 1) order = [panes.a.text.trim() && !panes.b.text.trim() ? panes.b : panes.a];
-    else order = twoPanes ? [panes.a, panes.b] : [panes.a];
-    loaded.slice(0, order.length).forEach((f, i) => order[i].setFile(f));
+    if (targetEl && panes[targetEl.dataset.pane]) { const first = panes[targetEl.dataset.pane]; order = [first, ...visible.filter((p) => p !== first)]; }
+    else if (loaded.length === 1) order = [visible.find((p) => !p.text.trim()) || visible[0]];
+    else order = visible;
+    loaded.forEach((f, i) => order[Math.min(i, order.length - 1)].setFile(f));
   });
 
   // ====================================================================== hand-off & boot
@@ -2425,7 +2652,7 @@
     if (data.error) { toast(data.error, 'error'); return; }
     if (typeof data.text === 'string') {
       log('info', 'handoff-received', { chars: data.text.length, source: data.source });
-      panes.a.setFile({ text: data.text, name: data.name || 'From page' });
+      firstPane().setFile({ text: data.text, name: data.name || 'From page' });
       toast(data.source === 'selection' ? 'Loaded the selected text' : 'Loaded the JSON from the page');
     }
   }
@@ -2440,7 +2667,7 @@
       const text = await res.text();
       if (text.length > MAX_FILE_BYTES) throw new Error('File is larger than the 50 MB limit.');
       assertText('This file', text);
-      panes.a.setFile({ text, name: decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || 'document.json') });
+      firstPane().setFile({ text, name: decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || 'document.json') });
     } catch (err) {
       log('error', 'open-url-failed', { error: String(err) });
       const allowed = await (window.chrome && chrome.extension && chrome.extension.isAllowedFileSchemeAccess ? chrome.extension.isAllowedFileSchemeAccess() : Promise.resolve(undefined)).catch(() => undefined);
@@ -2454,13 +2681,13 @@
     const mod = (e.metaKey || e.ctrlKey) && !e.altKey;
     if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();
-      (activePane || panes.a).save(e.shiftKey);
+      (activePane || firstPane()).save(e.shiftKey);
     } else if (mod && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       if ($('palette').hidden) openPalette(); else closePalette(true);
     } else if (mod && e.key.toLowerCase() === 'e') {
       e.preventDefault();
-      const p = activePane || panes.a;
+      const p = activePane || firstPane();
       p.setView(VIEWS[(VIEWS.indexOf(p.view) + 1) % VIEWS.length], true);
     } else if (e.key === 'Escape' && maxSide && $('palette').hidden && !openMenu) setMax(null);
   });
@@ -2489,7 +2716,7 @@
     const src = params.get('src');
     if (handoffId || src) history.replaceState(null, '', location.pathname);
 
-    await Promise.all([panes.a.reload(), panes.b.reload()]);
+    await Promise.all(orderedPanes().map((p) => p.reload()));
 
     if (handoffId && window.chrome && chrome.storage && chrome.storage.session) {
       try {

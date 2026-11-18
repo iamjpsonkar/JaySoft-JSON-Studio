@@ -27,7 +27,11 @@ button { font: inherit; color: var(--text); }
 button:focus-visible, .field:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ---------- top bar ---------- */
-.topbar { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.topbar { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-height: 46px; padding: 5px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+/* nothing in the top bar may shrink or wrap its own text (that broke the buttons at narrow widths); the bar wraps onto more rows instead */
+.topbar > * { flex: none; white-space: nowrap; }
+.topbar > .spacer { flex: 1 1 0; min-width: 0; }
+.topbar .segmented button, .topbar .btn { white-space: nowrap; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; white-space: nowrap; }
 .brand img { border-radius: 6px; }
 .status { color: var(--muted); font-size: 12.5px; }
@@ -55,7 +59,8 @@ a.btn { display: inline-flex; align-items: center; color: var(--text); text-deco
 #stage { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #paneRow { flex: 1 1 0; display: flex; min-height: 0; }
 #stage:not([data-mode="viewer"]) #paneRow { flex: 0 0 42%; border-bottom: 1px solid var(--border); }
-#paneRow[data-layout="1"] .docpane[data-pane="b"] { display: none; }
+/* "1 pane" shows the pane you are working in (the .active one) */
+#paneRow[data-layout="1"] .docpane:not(.active) { display: none; }
 #cmpPanel, #valPanel { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
 .docpane { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 /* resizing, maximise */
@@ -65,7 +70,7 @@ a.btn { display: inline-flex; align-items: center; color: var(--text); text-deco
 .hsplit:hover, .hsplit:focus-visible, .hsplit.drag { background: var(--accent-soft); outline: none; }
 body.resizing { user-select: none; }
 #paneRow[data-layout="1"] .vsplit, #paneRow[data-max] .vsplit { display: none; }
-#paneRow[data-max="a"] .docpane[data-pane="b"], #paneRow[data-max="b"] .docpane[data-pane="a"] { display: none; }
+#paneRow[data-max] .docpane:not(.maxed) { display: none; }
 /* the saved split only applies while both panes are visible; a lone pane always fills the row */
 #paneRow[data-layout="1"] .docpane, #paneRow[data-max] .docpane { flex: 1 1 0 !important; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
@@ -110,7 +115,7 @@ body.resizing { user-select: none; }
 /* code editor: line-number gutter + coloured layer behind a transparent textarea (same metrics, scrolled together) */
 .editor { flex: 1; min-height: 0; display: flex; background: var(--bg); }
 .ed-gutter { flex: none; margin: 0; padding: 12px 10px 40px; min-width: 3.4em; text-align: right; overflow: hidden; user-select: none; color: var(--muted); background: var(--surface); border-right: 1px solid var(--border); font: 13px/20px var(--mono); font-variant-numeric: tabular-nums; }
-.ed-main { position: relative; flex: 1; min-width: 0; }
+.ed-main { position: relative; flex: 1; min-width: 0; overflow: hidden; } /* clips the invisible width-measuring probe, which would otherwise widen the page */
 .ed-hl, .ed-find, .ed-brk, .editor textarea { position: absolute; inset: 0; margin: 0; padding: 12px 14px 40px; border: 0; font: 13px/20px var(--mono); white-space: pre; tab-size: 2; letter-spacing: normal; word-spacing: normal; }
 .ed-hl, .ed-find, .ed-brk { overflow: hidden; pointer-events: none; }
 .ed-hl { color: var(--text); }
@@ -189,8 +194,8 @@ details.more ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
 .empty { margin: auto; color: var(--muted); text-align: center; padding: 40px; font-family: var(--ui); }
 
 /* ---------- preview (formatted, read-only) ---------- */
-.ed-hl .p-key { color: var(--k-key); } .ed-hl .p-str { color: var(--k-str); } .ed-hl .p-num { color: var(--k-num); }
-.ed-hl .p-kw { color: var(--k-bool); }
+.ed-hl .p-key, .fold-view .p-key { color: var(--k-key); } .ed-hl .p-str, .fold-view .p-str { color: var(--k-str); } .ed-hl .p-num, .fold-view .p-num { color: var(--k-num); }
+.ed-hl .p-kw, .fold-view .p-kw { color: var(--k-bool); }
 .query-results { flex: 1; overflow: auto; font: 13px/1.5 var(--mono); }
 .q-row { display: flex; gap: 12px; padding: 4px 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
 .q-row:hover { background: var(--surface); }
@@ -263,3 +268,26 @@ details.more ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
 .palette li.none { color: var(--muted); cursor: default; }
 
 @media (max-width: 900px) { .vsplit { display: none; } #paneRow { flex-direction: column; } .docpane + .docpane { border-left: 0; border-top: 1px solid var(--border); } .brand span { display: none; } }
+
+/* panes: the chips that jump between panes, role badges while comparing or validating */
+.segmented.small button { padding: 2px 10px; }
+.cmp-options .field { padding: 2px 6px; }
+
+/* fold view: the formatted text with a fold arrow beside every multi-line block (read-only) */
+.fold-view { flex: 1; min-height: 0; overflow: auto; padding: 12px 0 60px; background: var(--bg); font: 13px/20px var(--mono); outline: none; }
+.fold-view[hidden] { display: none; }
+.fl { display: flex; align-items: baseline; white-space: pre; min-width: max-content; }
+.fl:hover { background: var(--surface); }
+.fl-n { flex: none; width: 3.4em; padding-right: 10px; text-align: right; color: var(--muted); user-select: none; font-variant-numeric: tabular-nums; }
+.fold-arrow, .fold-sp { flex: none; width: 1.6em; text-align: center; }
+.fold-arrow { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0; font: inherit; }
+.fold-arrow:hover, .fold-arrow:focus-visible { color: var(--accent); outline: none; }
+.fold-ellipsis { margin: 0 4px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--muted); cursor: pointer; font: 11px var(--ui); line-height: 16px; }
+.fold-ellipsis:hover { background: var(--accent-soft); color: var(--accent); }
+.fl-t { flex: 1; padding-right: 16px; }
+
+/* narrow windows stack the panes: give each a usable height and let the row scroll, instead of squeezing four panes into one screen */
+@media (max-width: 900px) {
+  #paneRow { overflow-y: auto; }
+  #paneRow[data-layout="2"]:not([data-max]) .docpane { flex: 0 0 auto !important; min-height: 340px; }
+}

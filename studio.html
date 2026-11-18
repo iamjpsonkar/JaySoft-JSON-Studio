@@ -12,14 +12,16 @@
     <div class="brand"><img src="icons/icon32.png" alt="" width="22" height="22"><span>JSON Studio</span></div>
     <div class="segmented" id="modeSwitch" role="group" aria-label="Mode">
       <button data-mode="viewer" title="Work with one or two documents">Viewer</button>
-      <button data-mode="compare" title="Compare A and B">Compare</button>
-      <button data-mode="validate" title="Validate A against the JSON Schema in B">Validate</button>
+      <button data-mode="compare" title="Compare two panes">Compare</button>
+      <button data-mode="validate" title="Validate a document pane against the JSON Schema in another pane">Validate</button>
     </div>
     <div class="segmented" id="layoutSwitch" role="group" aria-label="Panes">
-      <button data-layout="1" title="One pane">1 pane</button>
-      <button data-layout="2" title="Two panes side by side">2 panes</button>
+      <button data-layout="1" title="Show only the pane you are working in">1 pane</button>
+      <button data-layout="2" title="All panes side by side">2 panes</button>
     </div>
-    <button class="btn" id="btnSync" aria-pressed="false" title="Scroll both panes together">Sync scroll: off</button>
+    <div class="segmented small" id="paneChips" role="group" aria-label="Go to pane" hidden></div>
+    <button class="btn" id="btnAddPane" title="Add another pane (up to 4), each with its own documents">+ Pane</button>
+    <button class="btn" id="btnSync" aria-pressed="false" title="Scroll all panes together">Sync scroll: off</button>
     <div class="spacer"></div>
     <span class="status" id="status" role="status" aria-live="polite"></span>
     <a class="btn" id="linkExt" href="https://github.com/iamjpsonkar/JaySoft-JSON-Studio#install" target="_blank" rel="noopener" hidden title="This page is the web version. The Chrome extension also opens JSON from the pages you browse.">Get the extension</a>
@@ -35,10 +37,11 @@
 
     <section id="valPanel" hidden>
       <div class="cmp-options">
-        <span class="meta"><strong>A</strong> = the document, <strong>B</strong> = a JSON Schema</span>
+        <label class="check">Document <select id="vData" class="field" aria-label="Pane holding the document"></select></label>
+        <label class="check">Schema <select id="vSchemaPane" class="field" aria-label="Pane holding the JSON Schema"></select></label>
         <div class="spacer"></div>
-        <button class="tb" id="vInfer" title="Write a schema inferred from A into B">Infer schema from A → B</button>
-        <button class="tb" id="vSwap" title="Swap A and B">⇄ Swap</button>
+        <button class="tb" id="vInfer" title="Write a schema inferred from the document into the schema pane">Infer schema → schema pane</button>
+        <button class="tb" id="vSwap" title="Swap the contents of the two panes">⇄ Swap</button>
         <button class="tb" id="vToggleInputs" title="Show or hide the two panes">Hide panes</button>
       </div>
       <div class="toolbar2"><span class="chips" id="vStats"></span></div>
@@ -47,6 +50,8 @@
 
     <section id="cmpPanel" hidden>
       <div class="cmp-options" id="cOptions">
+        <label class="check">Compare <select id="cLeft" class="field" aria-label="First pane"></select></label>
+        <label class="check">with <select id="cRight" class="field" aria-label="Second pane"></select></label>
         <label class="check"><input type="checkbox" id="oOrder" checked> ignore key order</label>
         <label>Arrays
           <select id="oArray" class="field">
@@ -95,6 +100,7 @@
         </div>
         <div class="spacer"></div>
         <button class="tb" data-act="max" title="Maximise this pane (Esc to restore)" aria-pressed="false">⤢</button>
+        <button class="tb" data-act="close-pane" title="Close this pane and its documents" aria-label="Close this pane">✕</button>
         <button class="tb" data-act="open" title="Open a file">Open</button>
         <button class="tb" data-act="recent" title="Recently opened files">Recent ▾</button>
         <button class="tb" data-act="paste" title="Paste from clipboard">Paste</button>
@@ -140,11 +146,16 @@
             <span class="meta" data-f-note></span>
             <button class="tb" data-act="transform" title="Sort, minify, clean up, convert… (changes the document)">Transform ▾</button>
             <button class="tb" data-act="wrap" aria-pressed="true" title="Word wrap (applies to Raw and Preview)">Wrap</button>
+            <button class="tb" data-act="fold" aria-pressed="false" title="Fold view: collapse and expand any block { } [ ]. It is read-only: click Fold again to edit.">Fold</button>
+            <button class="tb" data-act="fold-collapse" hidden title="Collapse every block">Collapse all</button>
+            <button class="tb" data-act="fold-expand" hidden title="Expand every block">Expand all</button>
+            <select class="field" data-fold-level hidden title="Keep this many levels open" aria-label="Fold level"><option value="">Level…</option><option value="1">Level 1</option><option value="2">Level 2</option><option value="3">Level 3</option><option value="4">Level 4</option></select>
             <button class="tb" data-act="find-preview" title="Find and replace (Ctrl/Cmd+F)">Find</button>
             <button class="tb" data-act="copy-fmt">Copy</button>
             <button class="tb" data-act="download">Download</button>
             <button class="tb" data-act="save-fmt" title="Save the formatted text to a file">Save formatted…</button>
           </div>
+          <div class="fold-view" data-fold-view hidden tabindex="0" role="tree" aria-label="Formatted preview with collapsible blocks (read-only)"></div>
           <div class="editor" data-editor="preview">
             <pre class="ed-gutter" aria-hidden="true"></pre>
             <div class="ed-main">
@@ -223,6 +234,7 @@
   <script src="core/convert.js"></script>
   <script src="core/schema.js"></script>
   <script src="core/transform.js"></script>
+  <script src="core/folding.js"></script>
   <script src="studio.js"></script>
 </body>
 </html>

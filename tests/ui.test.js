@@ -24,7 +24,7 @@ async function boot({ search = '', session = {}, prefs } = {}) {
   w.chrome = { storage: { session: { get: async (k) => ({ [k]: session[k] }), remove: async (k) => { delete session[k]; } } } };
   w.confirm = () => true;
   if (prefs) w.localStorage.setItem('jsstudio.prefs.v1', JSON.stringify(prefs));
-  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema', 'transform']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
+  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema', 'transform', 'folding']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
   w.JSS.setLogLevel('error');
   w.eval(fs.readFileSync(path.join(ROOT, 'studio.js'), 'utf8'));
   await sleep(60);
@@ -665,7 +665,10 @@ const ptr = (w, el, type, o) => el.dispatchEvent(new w.MouseEvent(type, Object.a
 test('resize by dragging the divider; keyboard and double-click; clamped and remembered', async () => {
   const t = await boot();
   const split = t.$('paneSplit');
-  t.$('paneRow').getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 });
+  // a divider measures the two panes beside it (jsdom has no layout)
+  const rectOf = (l, r) => () => ({ left: l, right: r, top: 0, width: r - l, height: 600 });
+  t.a.root.getBoundingClientRect = rectOf(0, 500);
+  t.b.root.getBoundingClientRect = rectOf(500, 1000);
   ptr(t.w, split, 'pointerdown');
   ptr(t.w, split, 'pointermove', { clientX: 300 });
   const flex = (p) => p.root.style.flex.replace(/ 0px$/, ' 0'); // jsdom writes 0 as 0px
@@ -674,9 +677,9 @@ test('resize by dragging the divider; keyboard and double-click; clamped and rem
   ptr(t.w, split, 'pointermove', { clientX: 5 });
   assert.equal(flex(t.a), '0.15 1 0', 'a pane cannot be dragged away');
   ptr(t.w, split, 'pointerup');
-  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).split, 0.15, 'remembered');
+  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).weights.a, 0.15, 'remembered');
   key(t.w, split, 'ArrowRight');
-  assert.equal(Math.round(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).split * 100), 17);
+  assert.equal(Math.round(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).weights.a * 100), 17);
   split.dispatchEvent(new t.w.MouseEvent('dblclick', { bubbles: true }));
   assert.equal(flex(t.a), '0.5 1 0');
   // after a reload the saved size is applied
@@ -786,14 +789,14 @@ async function bootSeeded(session, extra) {
   Object.assign(w, { TextDecoder, TextEncoder, Blob, Response, DecompressionStream });
   Object.defineProperty(w.navigator, 'clipboard', { value: { writeText: async () => {}, readText: async () => '' } });
   w.confirm = () => true;
-  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema', 'transform']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
+  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema', 'transform', 'folding']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
   w.JSS.setLogLevel('error');
   w.eval(fs.readFileSync(path.join(ROOT, 'studio.js'), 'utf8'));
   await sleep(120);
   const click = (el) => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
   const root = w.document.querySelector('.docpane[data-pane="a"]');
   const rootB = w.document.querySelector('.docpane[data-pane="b"]');
-  const side = (r) => ({ q: (x) => r.querySelector(x), qa: (x) => [...r.querySelectorAll(x)], input: r.querySelector('[data-input]') });
+  const side = (r) => (r ? { q: (x) => r.querySelector(x), qa: (x) => [...r.querySelectorAll(x)], input: r.querySelector('[data-input]') } : null);
   return { w, click, a: side(root), b: side(rootB) };
 }
 
@@ -1033,7 +1036,7 @@ test('command palette: Ctrl/Cmd+K, filter, run, Escape; commands reflect state',
   assert.ok(!titles().includes('A: undo edit'), 'unavailable commands are not offered');
   assert.ok(!titles().includes('Mode: Viewer'), 'nor the state that is already active');
   const set = (v) => { t.$('palInput').value = v; t.$('palInput').dispatchEvent(new t.w.Event('input')); };
-  set('compare');
+  set('mode: compare');
   assert.deepEqual(titles(), ['Mode: Compare']);
   key(t.w, t.$('palInput'), 'Enter');
   assert.equal(t.$('stage').dataset.mode, 'compare');
@@ -1709,4 +1712,407 @@ test('on github.io (storage shared with other pages) documents are never kept be
   await sleep(700);
   assert.equal(t.w.localStorage.getItem(KEY) === null || JSON.parse(t.w.localStorage.getItem(KEY)).a.text === '{"stale": true}', true, 'nothing new was written');
   assert.notEqual(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).keepDocs, true, 'a stored opt-in is switched off here, never honoured');
+});
+
+test('narrow windows: the top bar wraps instead of shrinking its buttons, and the measuring probe cannot widen the page', () => {
+  // jsdom has no layout, so this guards the CSS rules that were verified in real Chrome (no overlap, nothing off-screen from 1400 px down to 400 px)
+  const css = fs.readFileSync(path.join(ROOT, 'studio.css'), 'utf8');
+  assert.match(css, /\.topbar \{[^}]*flex-wrap: wrap/);
+  assert.match(css, /\.topbar > \* \{ flex: none; white-space: nowrap; \}/);
+  assert.match(css, /\.ed-main \{[^}]*overflow: hidden/);
+});
+
+
+test('find and replace edits the document through the textarea: the Find and Replace boxes are never written to and keep the focus', async () => {
+  const t = await boot();
+  await t.a.type('{"name": "Ann", "alias": "ann", "n": 12}');
+  // like a real browser: execCommand('insertText') inserts into whichever element has the focus
+  const calls = [];
+  t.w.document.execCommand = (cmd, ui, text) => {
+    const el = t.w.document.activeElement;
+    calls.push(el);
+    if (cmd !== 'insertText') return false;
+    if (el.tagName === 'TEXTAREA') { el.setRangeText(text, el.selectionStart, el.selectionEnd, 'end'); el.dispatchEvent(new t.w.Event('input', { bubbles: true })); } else el.value += text;
+    return true;
+  };
+  t.a.act('find-raw');
+  const bar = t.a.q('[data-view-raw] .findbar');
+  const [term, repl] = bar.querySelectorAll('input.field');
+  const set = (el, v) => { el.value = v; el.dispatchEvent(new t.w.Event('input', { bubbles: true })); };
+  set(term, 'ann'); set(repl, 'Bob');
+  term.focus();
+  const btn = (txt) => [...bar.querySelectorAll('button')].find((b) => b.textContent === txt);
+  t.click(btn('All'));
+  await sleep(380);
+  assert.equal(t.a.input.value, '{"name": "Bob", "alias": "Bob", "n": 12}');
+  assert.equal(term.value, 'ann', 'the Find box was not touched');
+  assert.equal(repl.value, 'Bob');
+  assert.ok(calls.length && calls.every((el) => el === t.a.input), 'the edit ran with the textarea focused');
+  assert.equal(t.w.document.activeElement, term, 'and the focus went back to where it was');
+  // replace one
+  set(term, 'Bob'); set(repl, 'Cy');
+  calls.length = 0;
+  t.click(btn('Replace'));
+  await sleep(380);
+  assert.equal(t.a.input.value, '{"name": "Cy", "alias": "Bob", "n": 12}');
+  assert.equal(term.value, 'Bob');
+  assert.ok(calls.every((el) => el === t.a.input));
+  assert.deepEqual(t.errors, []);
+});
+
+// ====================================================================== + Pane: up to four panes, each with a close button
+const nPanes = (t) => t.qa('.docpane').length;
+const ptrAt = (t, el, type, o) => el.dispatchEvent(new t.w.MouseEvent(type, Object.assign({ bubbles: true, cancelable: true, button: 0 }, o)));
+const flexNum = (el) => parseFloat(el.style.flex);
+
+test('+ Pane adds independent panes C and D (up to four); the new pane is active; sessions remember the set', async () => {
+  const t = await boot();
+  assert.equal(nPanes(t), 2);
+  assert.equal(t.$('btnAddPane').disabled, false);
+  assert.equal(t.$('paneChips').hidden, false);
+  t.click('btnAddPane');
+  assert.equal(nPanes(t), 3);
+  const c = t.pane('c');
+  assert.equal(c.q('[data-label]').textContent, 'C');
+  assert.equal(c.activeBtn(), 'raw');
+  assert.deepEqual(t.qa('#paneChips button').map((b) => b.textContent), ['A', 'B', 'C']);
+  assert.equal(t.$('layoutSwitch').querySelector('[data-layout="2"]').textContent, '3 panes', 'the second layout button counts the panes');
+  assert.equal(t.qa('#paneRow .vsplit').length, 2, 'a divider between each neighbouring pair');
+  assert.equal(t.q('.docpane.active').dataset.pane, 'c', 'the new pane is the one you work in');
+  await c.type('{"only": "in c"}');
+  assert.equal(t.a.input.value, '');
+  assert.equal(t.b.input.value, '', 'panes do not share documents');
+  assert.equal(t.pane('c').chips()[0], 'JSON');
+  t.click('btnAddPane');
+  assert.equal(nPanes(t), 4);
+  assert.deepEqual(t.qa('#paneChips button').map((b) => b.textContent), ['A', 'B', 'C', 'D']);
+  assert.equal(t.$('btnAddPane').disabled, true, 'four is the limit');
+  assert.match(t.$('btnAddPane').title, /Up to 4 panes/);
+  t.click('btnAddPane');
+  assert.equal(nPanes(t), 4);
+  t.w.dispatchEvent(new t.w.Event('beforeunload'));
+  const saved = JSON.parse(t.w.sessionStorage.getItem('jsstudio.session.v1'));
+  assert.deepEqual(saved.ids, ['a', 'b', 'c', 'd']);
+  assert.equal(saved.c.text, '{"only": "in c"}');
+  assert.deepEqual(t.errors, []);
+});
+
+test('the close button on every pane: empty panes close at once, panes with documents ask; the last one stays; letters are reused', async () => {
+  const t = await boot();
+  assert.ok(t.qa('[data-act="close-pane"]').every((b) => !b.hidden), 'shown while there is more than one pane');
+  await t.b.type('{"b": 1}');
+  const asks = [];
+  t.w.confirm = (m) => { asks.push(m); return false; };
+  t.pane('b').act('close-pane');
+  assert.equal(nPanes(t), 2, 'declining keeps it');
+  assert.match(asks[0], /Close pane B\? Its 1 document will be closed/);
+  t.w.confirm = (m) => { asks.push(m); return true; };
+  t.pane('b').act('close-pane');
+  assert.equal(nPanes(t), 1);
+  assert.equal(t.q('.docpane').dataset.pane, 'a');
+  assert.ok(t.qa('[data-act="close-pane"]').every((b) => b.hidden), 'nothing to close the last pane into');
+  assert.equal(t.$('layoutSwitch').hidden, true, 'no layout choice with a single pane');
+  assert.equal(t.$('paneChips').hidden, true);
+  t.pane('a').act('close-pane');
+  assert.equal(nPanes(t), 1, 'the last pane cannot be closed');
+  assert.match(t.$('toast').textContent, /At least one pane stays open/);
+  // the freed letter comes back, empty
+  t.click('btnAddPane');
+  assert.equal(t.pane('b').input.value, '', 'a re-added B is a fresh pane, not the closed one');
+  asks.length = 0;
+  t.pane('b').act('close-pane');
+  assert.equal(asks.length, 0, 'an empty pane closes without asking');
+  // closing A while B exists
+  t.click('btnAddPane');
+  await t.pane('b').type('[1]');
+  t.pane('a').act('close-pane');
+  assert.deepEqual(t.qa('.docpane').map((p) => p.dataset.pane), ['b']);
+  assert.equal(t.q('.docpane.active').dataset.pane, 'b', 'another pane takes over');
+  t.click('btnAddPane');
+  assert.deepEqual(t.qa('.docpane').map((p) => p.dataset.pane), ['a', 'b'], 'letters stay in order: A comes back in front');
+  assert.equal(t.pane('b').input.value, '[1]');
+  assert.deepEqual(t.errors, []);
+});
+
+test('each divider resizes only the two panes next to it; double-click resets them; "1 pane" shows the pane you are in', async () => {
+  const t = await boot();
+  t.click('btnAddPane');
+  const rect = (el, l, r) => { el.getBoundingClientRect = () => ({ left: l, right: r, top: 0, width: r - l, height: 600 }); };
+  rect(t.pane('a').root, 0, 300); rect(t.pane('b').root, 300, 600); rect(t.pane('c').root, 600, 900);
+  const second = t.$('paneSplit2');
+  assert.equal(second.dataset.between, 'b,c');
+  const a0 = flexNum(t.pane('a').root);
+  ptrAt(t, second, 'pointerdown'); ptrAt(t, second, 'pointermove', { clientX: 660 }); ptrAt(t, second, 'pointerup'); // 60% of the way across b and c (300 to 900)
+  assert.ok(Math.abs(flexNum(t.pane('a').root) - a0) < 1e-9, 'A is untouched');
+  const b = flexNum(t.pane('b').root), c = flexNum(t.pane('c').root);
+  assert.ok(Math.abs(b / (b + c) - 0.6) < 1e-9);
+  assert.ok(Math.abs(b + c - 2 / 3) < 1e-9, 'the two keep their combined size');
+  second.dispatchEvent(new t.w.MouseEvent('dblclick', { bubbles: true }));
+  assert.ok(Math.abs(flexNum(t.pane('b').root) - flexNum(t.pane('c').root)) < 1e-9, 'reset to equal');
+  const w = JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).weights;
+  assert.ok(w.a > 0 && w.b > 0 && w.c > 0, 'sizes are remembered');
+  // adding a pane gives everyone equal width again
+  t.click('btnAddPane');
+  assert.ok(['a', 'b', 'c', 'd'].every((x) => Math.abs(flexNum(t.pane(x).root) - 0.25) < 1e-9));
+  // "1 pane" shows the pane you are working in, and the chips switch between them
+  t.click(t.q('#layoutSwitch [data-layout="1"]'));
+  assert.equal(t.$('paneRow').dataset.layout, '1');
+  assert.equal(t.q('.docpane.active').dataset.pane, 'd');
+  t.click(t.q('#paneChips [data-chip="b"]'));
+  assert.equal(t.q('.docpane.active').dataset.pane, 'b', 'with one pane on screen the chip brings another in');
+  t.click(t.q('#layoutSwitch [data-layout="2"]'));
+  assert.equal(t.$('paneRow').dataset.layout, '2');
+  // adding a pane from "1 pane" shows all of them, so the new one is not hidden
+  t.click(t.q('#layoutSwitch [data-layout="1"]'));
+  t.w.confirm = () => true;
+  t.pane('d').act('close-pane');
+  t.click('btnAddPane');
+  assert.equal(t.$('paneRow').dataset.layout, '2');
+  assert.deepEqual(t.errors, []);
+});
+
+test('Compare and Validate: pick which two panes; the choice follows closed panes and is remembered', async () => {
+  const t = await boot();
+  t.click('btnAddPane');
+  await t.a.type('{"v": 1}');
+  await t.b.type('{"v": 2}');
+  await t.pane('c').type('{"v": 2, "extra": true}');
+  t.click(t.q('#modeSwitch [data-mode="compare"]'));
+  await sleep(300);
+  const opts = (id) => [...t.$(id).options].map((o) => o.value);
+  assert.deepEqual(opts('cLeft'), ['a', 'b', 'c']);
+  assert.equal(t.$('cLeft').value, 'a'); assert.equal(t.$('cRight').value, 'b');
+  assert.match(t.$('cStats').textContent, /~1 changed/);
+  assert.match(t.q('#cBody .hdr').textContent, /A.*B/s);
+  const choose = async (id, v) => { t.$(id).value = v; t.$(id).dispatchEvent(new t.w.Event('change')); await sleep(300); };
+  await choose('cRight', 'c');
+  assert.match(t.$('cStats').textContent, /\+1 added/, 'A against C');
+  assert.match(t.q('#cBody .hdr').textContent, /A.*C/s);
+  await choose('cLeft', 'c');
+  assert.notEqual(t.$('cLeft').value, t.$('cRight').value, 'the two sides are never the same pane');
+  assert.deepEqual(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).pair.length, 2, 'remembered');
+  await choose('cLeft', 'b'); await choose('cRight', 'c');
+  assert.equal(t.$('stage').dataset.mode, 'compare');
+  t.w.confirm = () => true;
+  t.pane('c').act('close-pane'); await sleep(300);
+  assert.deepEqual(opts('cLeft'), ['a', 'b']);
+  assert.notEqual(t.$('cLeft').value, t.$('cRight').value, 'closing a compared pane falls back to two that exist');
+  // swap exchanges the two chosen panes' documents
+  t.click('cSwap'); await sleep(450);
+  const ab = [t.pane(t.$('cLeft').value).input.value, t.pane(t.$('cRight').value).input.value].sort();
+  assert.deepEqual(ab, ['{"v": 1}', '{"v": 2}']);
+  // one pane left: a clear message instead of a diff
+  t.pane('b').act('close-pane'); await sleep(300);
+  assert.match(t.$('cBody').textContent, /Add a second pane/);
+  // Validate: document in C, schema in B
+  t.click('btnAddPane'); t.click('btnAddPane');
+  await t.pane('b').type(JSON.stringify({ type: 'object', required: ['x'] }));
+  await t.pane('c').type('{"y": 1}');
+  t.click(t.q('#modeSwitch [data-mode="validate"]'));
+  await sleep(300);
+  assert.deepEqual(opts('vData'), ['a', 'b', 'c']);
+  const pickV = async (id, v) => { t.$(id).value = v; t.$(id).dispatchEvent(new t.w.Event('change')); await sleep(350); };
+  await pickV('vSchemaPane', 'b'); await pickV('vData', 'c');
+  assert.equal(t.q('#vStats .chip').textContent, '1 error');
+  t.click(t.q('#vBody .v-row'));
+  assert.equal(t.q('.docpane.active').dataset.pane, 'c', 'an error opens in the document pane');
+  assert.equal(t.pane('c').activeBtn(), 'tree');
+  await t.pane('c').type('{"x": 1}'); await sleep(350);
+  assert.match(t.$('vBody').textContent, /C conforms to the schema in B/);
+  assert.deepEqual(t.errors, []);
+});
+
+test('sessions: the pane set is restored per tab; an older two-pane session still opens; files dropped fill the first empty visible pane', async () => {
+  const mk = (text) => ({ text, name: 'n.json', view: 'raw', tab: 0, tabs: [{ text, name: 'n.json', view: 'raw' }] });
+  const t = await bootSeeded({ ids: ['a', 'c'], a: mk('{"in": "a"}'), c: mk('{"in": "c"}') });
+  const doc = t.w.document;
+  assert.deepEqual([...doc.querySelectorAll('.docpane')].map((p) => p.dataset.pane), ['a', 'c']);
+  assert.equal(doc.querySelector('.docpane[data-pane="c"] [data-input]').value, '{"in": "c"}');
+  assert.equal(doc.getElementById('paneSplit').dataset.between, 'a,c');
+  const legacy = await bootSeeded({ a: mk('{"in": "a"}'), b: mk('{"in": "b"}') });
+  assert.deepEqual([...legacy.w.document.querySelectorAll('.docpane')].map((p) => p.dataset.pane), ['a', 'b'], 'no ids: the two panes older versions had');
+  const four = await bootSeeded({ ids: ['a', 'b', 'c', 'd'], a: mk('1'), b: mk('2'), c: mk('3'), d: mk('4') });
+  assert.equal(four.w.document.querySelectorAll('.docpane').length, 4);
+  assert.equal(four.w.document.querySelector('.docpane[data-pane="d"] [data-input]').value, '4');
+  // dropping files
+  const u = await boot();
+  u.click('btnAddPane');
+  await u.a.type('{"taken": true}'); await u.b.type('{"taken": true}');
+  const drop = async (target, files) => {
+    const ev = new u.w.Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'dataTransfer', { value: { types: ['Files'], items: files.map((f) => ({ kind: 'file', getAsFile: () => f })) } });
+    target.dispatchEvent(ev);
+    await sleep(450);
+  };
+  const file = (name, text) => ({ name, size: text.length, text: async () => text });
+  await drop(u.w.document.body, [file('x.json', '{"x": 1}')]);
+  assert.equal(u.pane('c').input.value, '{"x": 1}', 'the first empty pane, not a pane that already has a document');
+  await drop(u.w.document.body, [file('p.json', '{"p": 1}'), file('q.json', '{"q": 1}'), file('r.json', '{"r": 1}'), file('s.json', '{"s": 1}')]);
+  assert.equal(u.pane('c').qa('[data-tabs] .tab').length >= 2, true, 'more files than panes become tabs in the last pane');
+  assert.deepEqual(u.errors, []);
+});
+
+test('with several panes: synced scrolling reaches all of them, any pane can be maximised, and the palette manages panes', async () => {
+  const t = await boot();
+  t.click('btnAddPane'); t.click('btnAddPane');
+  t.click('btnSync');
+  const scrollOf = (side) => t.pane(side).input;
+  scrollOf('a').scrollTop = 120;
+  scrollOf('a').dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(scrollOf('b').scrollTop, 120); assert.equal(scrollOf('c').scrollTop, 120); assert.equal(scrollOf('d').scrollTop, 120);
+  for (const x of ['b', 'c', 'd']) scrollOf(x).dispatchEvent(new t.w.Event('scroll')); // the echoes a browser sends for the mirrored panes: ignored
+  assert.equal(scrollOf('a').scrollTop, 120, 'the echoes do not bounce back');
+  scrollOf('c').scrollTop = 30;
+  scrollOf('c').dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(scrollOf('a').scrollTop, 30, 'from any pane to all the others');
+  assert.equal(scrollOf('d').scrollTop, 30);
+  // maximise pane C
+  t.pane('c').act('max');
+  assert.equal(t.$('paneRow').dataset.max, 'c');
+  assert.deepEqual(t.qa('.docpane.maxed').map((p) => p.dataset.pane), ['c']);
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(t.qa('.docpane.maxed').length, 0);
+  // palette
+  const run = (q) => { t.w.document.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true })); t.$('palInput').value = q; t.$('palInput').dispatchEvent(new t.w.Event('input')); const titles = [...t.w.document.querySelectorAll('#palList li')].map((l) => l.firstChild.textContent); key(t.w, t.$('palInput'), 'Enter'); return titles; };
+  assert.deepEqual(run('go to pane'), ['Go to pane A', 'Go to pane B', 'Go to pane C']);
+  assert.equal(t.q('.docpane.active').dataset.pane, 'a');
+  t.w.confirm = () => true;
+  assert.deepEqual(run('close pane'), ['Close pane A']);
+  assert.equal(nPanes(t), 3);
+  assert.deepEqual(run('add pane'), ['Add pane']);
+  assert.equal(nPanes(t), 4);
+  assert.deepEqual(run('add pane'), ['No matching command'], 'not offered at the limit');
+  assert.deepEqual(t.errors, []);
+});
+
+// ====================================================================== Fold view: collapse any block of the formatted preview
+const foldRows = (p) => p.qa('[data-fold-view] .fl').map((r) => `${r.querySelector('.fl-n').textContent}|${r.querySelector('.fl-t').textContent}`);
+const foldDoc = JSON.stringify({ a: { b: [1, 2], c: { d: 1 } }, e: [3] });
+
+test('Fold view: arrows beside every multi-line block; collapsing hides the block\'s lines and summarises it; Copy still gives the full text', async () => {
+  const t = await boot();
+  await t.a.type(foldDoc);
+  t.a.view('preview');
+  assert.equal(t.a.q('[data-fold-view]').hidden, true, 'the editable preview is the default');
+  assert.equal(t.a.q('[data-act="fold-collapse"]').hidden, true, 'fold controls appear with the fold view');
+  t.a.act('fold');
+  assert.equal(t.a.q('[data-fold-view]').hidden, false);
+  assert.equal(t.a.q('[data-editor="preview"]').hidden, true);
+  assert.equal(t.a.q('[data-act="fold"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(t.a.q('[data-act="fold-collapse"]').hidden, false);
+  assert.equal(foldRows(t.a).length, 14);
+  assert.equal(foldRows(t.a)[1], '2|  "a": {');
+  const arrows = t.a.qa('[data-fold-view] .fold-arrow');
+  assert.deepEqual(arrows.map((a) => a.dataset.fold), ['0', '1', '2', '6', '10'], 'one per multi-line block');
+  assert.ok(arrows.every((a) => a.textContent === '▾' && /Collapse the block starting on line/.test(a.getAttribute('aria-label'))));
+  assert.ok(t.a.qa('[data-fold-view] .p-key').length >= 4, 'still coloured');
+  // collapse "b" (line 3)
+  t.click(arrows[2]);
+  assert.deepEqual(foldRows(t.a).slice(0, 4), ['1|{', '2|  "a": {', '3|    "b": [… 2 lines],', '7|    "c": {'], 'the block\'s lines are replaced by a summary; numbers keep counting from the source');
+  assert.equal(t.a.q('[data-fold-view] .fold-arrow[data-fold="2"]').textContent, '▸');
+  assert.equal(t.a.q('[data-fold-view] [data-fold="2"][aria-label]').getAttribute('aria-label'), 'Expand the block starting on line 3');
+  assert.match(t.a.q('[data-f-note]').textContent, /Fold view, read-only: 1 block collapsed/);
+  // the summary expands it again
+  t.click(t.a.q('[data-fold-view] .fold-ellipsis'));
+  assert.equal(foldRows(t.a).length, 14);
+  // nothing about the text changed: Copy and the document are as before
+  t.click(t.a.qa('[data-fold-view] .fold-arrow')[1]);
+  t.a.act('copy-fmt'); await sleep(30);
+  assert.equal(t.w.__copied.pop(), JSON.stringify(JSON.parse(foldDoc), null, 2), 'Copy gives everything, folded or not');
+  assert.equal(t.a.input.value, foldDoc);
+  assert.deepEqual(t.errors, []);
+});
+
+test('Fold view: Collapse all, Expand all and Level N; state is kept while the text is the same and reset when it changes', async () => {
+  const t = await boot();
+  await t.a.type(foldDoc);
+  t.a.view('preview'); t.a.act('fold');
+  t.a.act('fold-collapse');
+  assert.deepEqual(foldRows(t.a), ['1|{… 12 lines}'], 'everything collapsed into the root block');
+  t.a.act('fold-expand');
+  assert.equal(foldRows(t.a).length, 14);
+  const level = (n) => { const sel = t.a.q('[data-fold-level]'); sel.value = String(n); sel.dispatchEvent(new t.w.Event('change')); };
+  level(2);
+  assert.deepEqual(foldRows(t.a), ['1|{', '2|  "a": {… 7 lines},', '11|  "e": [… 1 line]', '14|}'], 'level 2: the top level stays open, what is inside is collapsed');
+  level(3);
+  assert.deepEqual(foldRows(t.a).map((r) => r.split('|')[0]), ['1', '2', '3', '7', '10', '11', '12', '13', '14'], 'level 3: only the two innermost blocks are collapsed');
+  // leaving and re-entering keeps the folds; other text starts open again
+  level(2);
+  t.a.act('fold'); // leave: back to editing
+  assert.equal(t.a.q('[data-editor="preview"]').hidden, false);
+  assert.equal(t.a.q('[data-fold-view]').hidden, true);
+  assert.equal(t.a.q('[data-act="fold-collapse"]').hidden, true);
+  t.a.act('fold');
+  assert.equal(foldRows(t.a).length, 4, 'the same text: the folds are still there');
+  t.a.act('fold');
+  await t.a.type(JSON.stringify({ x: [1, 2, 3], y: { z: 1 } }));
+  t.a.act('fold');
+  assert.equal(foldRows(t.a).length, 10, 'different text: everything open again');
+  // typing in the editable preview, then folding, shows what was typed
+  t.a.act('fold');
+  const ta = t.a.q('[data-pinput]');
+  ta.value = '{\n  "k": [\n    1\n  ]\n}'; ta.dispatchEvent(new t.w.Event('input', { bubbles: true }));
+  await sleep(400);
+  t.a.act('fold');
+  assert.deepEqual(foldRows(t.a), ['1|{', '2|  "k": [', '3|    1', '4|  ]', '5|}']);
+  assert.deepEqual(t.errors, []);
+});
+
+test('Fold view: not offered where it cannot work (nothing to fold, invalid document, YAML); works on TypeScript and Python output; survives view switches', async () => {
+  const t = await boot();
+  await t.a.type('{"a": [1, 2], "b": {}}');
+  t.a.view('preview');
+  const indent = t.a.q('[data-f-indent]');
+  indent.value = '0'; indent.dispatchEvent(new t.w.Event('change'));
+  t.a.act('fold');
+  assert.match(t.$('toast').textContent, /Nothing to fold/);
+  assert.equal(t.a.q('[data-fold-view]').hidden, true, 'minified text has no multi-line blocks');
+  indent.value = '2'; indent.dispatchEvent(new t.w.Event('change'));
+  const style = t.a.q('[data-f-style]');
+  style.value = 'yaml'; style.dispatchEvent(new t.w.Event('change'));
+  t.a.act('fold');
+  assert.match(t.$('toast').textContent, /Nothing to fold/);
+  style.value = 'ts'; style.dispatchEvent(new t.w.Event('change'));
+  t.a.act('fold');
+  assert.equal(t.a.q('[data-fold-view]').hidden, false, 'TypeScript types have blocks');
+  assert.ok(foldRows(t.a).some((r) => /export interface Root \{/.test(r)));
+  style.value = 'python'; style.dispatchEvent(new t.w.Event('change'));
+  assert.ok(t.a.qa('[data-fold-view] .fold-arrow').length >= 1, 'switching the format redraws the fold view');
+  // the fold view belongs to the preview: other views are unaffected, and it is still on when you come back
+  t.a.view('tree'); t.a.view('preview');
+  assert.equal(t.a.q('[data-fold-view]').hidden, false);
+  // an invalid document: no fold view, the editable text shows
+  await t.a.type('{"broken": ');
+  assert.equal(t.a.q('[data-fold-view]').hidden, true);
+  assert.equal(t.a.q('[data-editor="preview"]').hidden, false);
+  assert.equal(t.a.q('[data-act="fold"]').disabled, true);
+  // each pane has its own fold view
+  await t.b.type('[1, [2, 3]]');
+  t.b.view('preview');
+  assert.equal(t.b.q('[data-fold-view]').hidden, true);
+  assert.deepEqual(t.errors, []);
+});
+
+test('Fold view: palette commands; large documents are capped with a note', async () => {
+  const t = await boot();
+  await t.a.type(foldDoc);
+  const run = (q) => { t.w.document.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true })); t.$('palInput').value = q; t.$('palInput').dispatchEvent(new t.w.Event('input')); const titles = [...t.w.document.querySelectorAll('#palList li')].map((l) => l.firstChild.textContent); key(t.w, t.$('palInput'), 'Enter'); return titles; };
+  assert.deepEqual(run('fold view on'), ['A: fold view on (collapse blocks in the preview)']);
+  assert.equal(t.a.activeBtn(), 'preview');
+  assert.equal(t.a.q('[data-fold-view]').hidden, false);
+  assert.deepEqual(run('fold view: collapse'), ['A: fold view: collapse all blocks']);
+  assert.deepEqual(foldRows(t.a), ['1|{… 12 lines}']);
+  assert.deepEqual(run('fold view: expand'), ['A: fold view: expand all blocks']);
+  assert.equal(foldRows(t.a).length, 14);
+  assert.deepEqual(run('fold view off'), ['A: fold view off (edit the preview)']);
+  assert.equal(t.a.q('[data-fold-view]').hidden, true);
+  // a document with more lines than the view draws
+  await t.b.type(JSON.stringify(Array.from({ length: 12000 }, (_, i) => ({ id: i }))));
+  t.b.view('preview'); t.b.act('fold');
+  assert.ok(t.b.qa('[data-fold-view] .fl').length === 20000);
+  assert.match(t.b.q('[data-fold-view] .notice').textContent, /Showing the first 20,000 lines/);
+  t.b.act('fold-collapse');
+  assert.equal(t.b.qa('[data-fold-view] .fl').length, 1);
+  assert.equal(t.b.q('[data-fold-view] .notice'), null, 'collapsing brings everything back under the cap');
+  assert.deepEqual(t.errors, []);
 });
