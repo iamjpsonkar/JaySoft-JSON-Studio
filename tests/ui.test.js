@@ -69,10 +69,10 @@ function fakeHandle(name, content, log) {
   };
 }
 
-test('both panes are identical: each has Raw / Preview / Tree and Open, Paste, Clear, Save, Save as', async () => {
+test('both panes are identical: each has Raw / Preview / Tree / Split and Open, Paste, Clear, Save, Save as', async () => {
   const t = await boot();
   for (const p of [t.a, t.b]) {
-    assert.deepEqual(p.qa('[data-views] button').map((b) => b.textContent), ['Raw', 'Preview', 'Tree']);
+    assert.deepEqual(p.qa('[data-views] button').map((b) => b.textContent), ['Raw', 'Preview', 'Tree', 'Split']);
     for (const act of ['open', 'paste', 'clear', 'save', 'saveas']) assert.ok(p.q(`[data-act="${act}"]`), `${p.root.dataset.pane}: ${act}`);
     assert.ok(p.input, 'has its own raw input');
     assert.deepEqual(p.visibleView(), ['raw'], 'a pane opens in Raw so JSON can be pasted straight in');
@@ -773,11 +773,13 @@ test('tabs are restored with the session', async () => {
   assert.equal(t.a.input.value, '{"first": 1}');
 });
 /** Like boot(), but sessionStorage is filled before studio.js runs (boot() cannot, the window does not exist yet). */
-async function bootSeeded(session) {
+async function bootSeeded(session, extra) {
+  extra = extra || {};
   const html = fs.readFileSync(path.join(ROOT, 'studio.html'), 'utf8').replace(/<script[^>]*src=[^>]*><\/script>/g, '');
-  const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'http://localhost/studio.html', pretendToBeVisual: true });
+  const dom = new JSDOM(html, { runScripts: 'outside-only', url: extra.url || 'http://localhost/studio.html', pretendToBeVisual: true });
   const w = dom.window;
-  w.sessionStorage.setItem('jsstudio.session.v1', JSON.stringify(session));
+  if (session) w.sessionStorage.setItem('jsstudio.session.v1', JSON.stringify(session));
+  for (const [k, v] of Object.entries(extra.local || {})) w.localStorage.setItem(k, JSON.stringify(v));
   w.console.warn = () => {};
   w.matchMedia = () => ({ matches: false, addEventListener() {} });
   w.Element.prototype.scrollIntoView = function () {};
@@ -790,7 +792,9 @@ async function bootSeeded(session) {
   await sleep(120);
   const click = (el) => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
   const root = w.document.querySelector('.docpane[data-pane="a"]');
-  return { w, click, a: { q: (s) => root.querySelector(s), qa: (s) => [...root.querySelectorAll(s)], input: root.querySelector('[data-input]') } };
+  const rootB = w.document.querySelector('.docpane[data-pane="b"]');
+  const side = (r) => ({ q: (x) => r.querySelector(x), qa: (x) => [...r.querySelectorAll(x)], input: r.querySelector('[data-input]') });
+  return { w, click, a: side(root), b: side(rootB) };
 }
 
 test('recent files: opened files are listed and reopen in a new tab; the list can be cleared', async () => {
@@ -801,7 +805,7 @@ test('recent files: opened files are listed and reopen in a new tab; the list ca
   await sleep(400);
   t.b.act('recent');
   await sleep(60);
-  assert.deepEqual([...t.w.document.querySelectorAll('.menu button')].map((b) => b.textContent), ['seen.json', 'Clear recent files'], 'the list is shared by both panes');
+  assert.deepEqual([...t.w.document.querySelectorAll('.menu button')].map((b) => b.textContent), ['seen.json', 'Clear recent files', 'Keep my documents between visits: off'], 'the list is shared by both panes');
   t.click(t.w.document.querySelector('.menu button'));
   await sleep(450);
   assert.equal(t.b.input.value, '{"seen": true}');
@@ -1358,4 +1362,351 @@ test('word wrap: on by default, one toggle for every editor, remembered, also in
   const css = fs.readFileSync(path.join(ROOT, 'studio.css'), 'utf8');
   assert.match(css, /\.editor\[data-wrap="on"\] textarea \{ white-space: pre-wrap/);
   assert.deepEqual(t.errors, []);
+});
+
+// ====================================================================== MD Studio parity, batch 1: line endings, binary files, multi-open, Ctrl+E, status bar
+test('line endings: CRLF files are saved as CRLF; the status bar shows and switches it; mixed endings are announced', async () => {
+  const t = await boot();
+  const log = [];
+  const crlf = fakeHandle('win.json', '{\r\n  "a": 1\r\n}\r\n', log);
+  t.w.showOpenFilePicker = async () => [crlf];
+  t.a.act('open');
+  await sleep(450);
+  assert.equal(t.a.input.value, '{\n  "a": 1\n}\n', 'the editor itself always works with \\n');
+  await sleep(80);
+  assert.equal(t.$('stEol').textContent, 'CRLF');
+  await t.a.type('{\n  "a": 2\n}\n');
+  t.a.act('save');
+  await sleep(150);
+  assert.deepEqual(log, [['win.json', '{\r\n  "a": 2\r\n}\r\n']], 'saved with the line ending the file came with');
+  t.$('stEol').click();
+  assert.equal(t.$('stEol').textContent, 'LF', 'click switches to LF');
+  assert.match(t.$('toast').textContent, /LF endings/);
+  t.a.act('save');
+  await sleep(150);
+  assert.equal(log[1][1], '{\n  "a": 2\n}\n', 'and the switch applies to the next save');
+  // a new document and pasted text
+  t.b.act('newtab'); await sleep(380);
+  assert.equal(t.$('stEol').textContent, 'LF', 'new documents start with LF');
+  // mixed endings
+  t.w.showOpenFilePicker = async () => [fakeHandle('mixed.json', '{\r\n"a": 1,\r\n"b": 2,\n"c": 3\r\n}', [])];
+  t.b.act('open');
+  await sleep(450);
+  assert.match(t.$('toast').textContent, /mixes CRLF and LF.*CRLF/);
+  assert.deepEqual(t.errors, []);
+});
+
+test('binary and oversized files are refused with a reason, the pane is left alone', async () => {
+  const t = await boot();
+  await t.a.type('{"keep": true}');
+  t.w.showOpenFilePicker = async () => [fakeHandle('pic.png', 'PNG\u0000\u0001\u0002data', [])];
+  t.a.act('open');
+  await sleep(400);
+  assert.match(t.$('toast').textContent, /pic\.png looks like a binary file/);
+  assert.equal(t.a.input.value, '{"keep": true}');
+  assert.equal(t.a.qa('[data-tabs] .tab').length, 1, 'no tab was added');
+  const big = fakeHandle('big.json', '{}', []);
+  const f = big.getFile;
+  big.getFile = async () => Object.assign(await f(), { size: 60 * 1024 * 1024 });
+  t.w.showOpenFilePicker = async () => [big];
+  t.a.act('open');
+  await sleep(400);
+  assert.match(t.$('toast').textContent, /big\.json is too large/);
+  assert.deepEqual(t.errors, []);
+});
+
+test('Open accepts several files: each gets its own tab; a bad one does not stop the rest', async () => {
+  const t = await boot();
+  let opts;
+  t.w.showOpenFilePicker = async (o) => { opts = o; return [fakeHandle('one.json', '{"n": 1}', []), fakeHandle('bad.bin', 'x\u0000y', []), fakeHandle('two.json', '{"n": 2}', []), fakeHandle('three.json', '{"n": 3}', [])]; };
+  t.a.act('open');
+  await sleep(600);
+  assert.equal(opts.multiple, true, 'the picker allows multiple files');
+  assert.deepEqual(t.a.qa('[data-tabs] .tab').map((x) => x.firstChild.textContent), ['one.json', 'two.json', 'three.json']);
+  assert.equal(t.a.input.value, '{"n": 3}', 'the last file is the one shown');
+  assert.match(t.$('toast').textContent, /bad\.bin looks like a binary file/);
+  assert.deepEqual(t.errors, []);
+});
+
+test('Ctrl/Cmd+E cycles the view of the pane in use', async () => {
+  const t = await boot();
+  const doc = t.w.document;
+  const press = () => doc.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'e', ctrlKey: true, bubbles: true, cancelable: true }));
+  assert.equal(t.a.activeBtn(), 'raw');
+  press(); assert.equal(t.a.activeBtn(), 'preview');
+  press(); assert.equal(t.a.activeBtn(), 'tree');
+  press(); assert.equal(t.a.activeBtn(), 'split');
+  press(); assert.equal(t.a.activeBtn(), 'raw', 'and round again');
+  press(); press(); press();
+  t.b.input.dispatchEvent(new t.w.Event('focusin', { bubbles: true }));
+  press(); assert.equal(t.b.activeBtn(), 'preview', 'acts on the active pane (B)');
+  assert.equal(t.a.activeBtn(), 'split', 'A did not move');
+});
+
+test('status bar: caret, selection, selected tree path, document stats', async () => {
+  const t = await boot();
+  const st = (id) => t.$(id).textContent;
+  await t.a.type('{\n  "a": {"b": [1, 2]},\n  "c": "x"\n}');
+  t.a.input.focus();
+  t.a.input.setSelectionRange(8, 8);
+  t.a.input.dispatchEvent(new t.w.Event('keyup', { bubbles: true }));
+  await sleep(120);
+  assert.equal(st('stPos'), 'A · Ln 2, Col 7');
+  t.a.input.setSelectionRange(4, 12);
+  t.a.input.dispatchEvent(new t.w.Event('select', { bubbles: true }));
+  await sleep(120);
+  assert.equal(st('stPos'), 'A · Ln 2, Col 3 (8 selected)');
+  assert.match(st('stDoc'), /^JSON · .* B · 6 nodes · depth 3$/);
+  assert.equal(t.$('stPath').hidden, true);
+  t.a.view('tree');
+  t.a.rows().find((r) => /^▾?\s*"b"|"b"/.test(t.rowText(r))).dispatchEvent(new t.w.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  assert.equal(t.$('stPath').hidden, false);
+  assert.equal(st('stPath'), '$.a.b');
+  t.$('stPath').click();
+  await sleep(40);
+  assert.equal(t.w.__copied.slice(-1)[0], '$.a.b');
+  t.b.input.dispatchEvent(new t.w.Event('focusin', { bubbles: true }));
+  await sleep(120);
+  assert.equal(st('stDoc'), '', 'follows the pane in use: B is empty');
+  assert.match(st('stPos'), /^B/);
+  await t.b.type('{broken');
+  t.b.input.dispatchEvent(new t.w.Event('keyup', { bubbles: true }));
+  await sleep(120);
+  assert.equal(st('stDoc'), 'parse error');
+  assert.deepEqual(t.errors, []);
+});
+
+// ====================================================================== MD Studio parity, batch 2: split view, outline
+test('Split view: Raw and Tree side by side; typing updates the tree without collapsing it; scrolling stays in step', async () => {
+  const t = await boot();
+  await t.a.type('{"a": {"x": 1, "y": {"deep": true}}, "b": [1, 2, 3]}');
+  t.a.view('split');
+  assert.deepEqual(t.a.visibleView(), ['raw', 'tree'], 'both are shown');
+  assert.equal(t.a.activeBtn(), 'split');
+  assert.ok(t.a.q('.pane-body').hasAttribute('data-split'));
+  assert.ok(t.a.rowTexts().some((r) => /"a": \{2\}/.test(r)), 'the tree is rendered at once');
+  // open a deeper branch, then edit the text: the tree must keep it open
+  t.a.rows().find((r) => /"y"/.test(t.rowText(r))).querySelector('.caret').click();
+  assert.ok(t.a.rowTexts().some((r) => /"deep": true/.test(r)));
+  await t.a.type('{"a": {"x": 2, "y": {"deep": true}}, "b": [1, 2, 3]}');
+  assert.ok(t.a.rowTexts().some((r) => /"deep": true/.test(r)), 'typing in Raw keeps the opened branch open');
+  assert.ok(t.a.rowTexts().includes('"x": 2'), 'and shows the new value');
+  // proportional scroll sync between the two halves
+  const raw = t.a.input, tree = t.a.q('[data-tree]');
+  const dim = (el, sh, ch) => { Object.defineProperty(el, 'scrollHeight', { value: sh, configurable: true }); Object.defineProperty(el, 'clientHeight', { value: ch, configurable: true }); };
+  dim(raw, 1000, 200); dim(tree, 2000, 200);
+  raw.scrollTop = 400;
+  raw.dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(tree.scrollTop, 900, 'half way down the text is half way down the tree (400/800 of 1800)');
+  tree.dispatchEvent(new t.w.Event('scroll')); // the echo is ignored
+  assert.equal(raw.scrollTop, 400);
+  tree.scrollTop = 1800;
+  tree.dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(raw.scrollTop, 800, 'and the other way');
+  // the choice belongs to the tab and is remembered
+  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).panes.a.view, 'split');
+  t.a.act('newtab'); await sleep(380);
+  assert.deepEqual(t.a.visibleView(), ['raw'], 'a new tab starts in Raw');
+  t.click(t.a.q('[data-tab="0"]')); await sleep(380);
+  assert.deepEqual(t.a.visibleView(), ['raw', 'tree'], 'tab 1 is back in Split');
+  assert.deepEqual(t.errors, []);
+});
+
+test('Outline: lists the top-level structure, jumps to a key, remembers the setting', async () => {
+  const t = await boot();
+  await t.a.type(JSON.stringify({ name: 'Ann', tags: ['a', 'b', 'c'], owner: { id: 7, team: { lead: 'x' } }, active: true }));
+  t.a.view('tree');
+  const box = t.a.q('[data-outline]');
+  assert.equal(box.hidden, true, 'off by default');
+  t.a.act('outline');
+  assert.equal(box.hidden, false);
+  assert.equal(t.a.q('[data-act="outline"]').getAttribute('aria-pressed'), 'true');
+  const items = () => [...box.querySelectorAll('.ol-item')].map((b) => `${b.querySelector('.ol-key').textContent} ${b.querySelector('.ol-meta').textContent}`);
+  assert.deepEqual(items(), ['name "Ann"', 'tags [3]', '[0] "a"', '[1] "b"', '[2] "c"', 'owner {2}', 'id 7', 'team {1}', 'active true']);
+  // jump: collapse everything, then click a nested outline entry
+  t.a.act('collapse-all');
+  assert.ok(!t.a.rowTexts().some((r) => /"lead"/.test(r)));
+  t.click([...box.querySelectorAll('.ol-item')].find((b) => b.querySelector('.ol-key').textContent === 'team'));
+  assert.ok(t.a.rowTexts().some((r) => /"team"/.test(r)), 'the branch is opened so the row exists');
+  assert.ok(t.w.__scrolled && /"team"/.test(t.w.__scrolled.textContent), 'and scrolled to');
+  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).outline, true);
+  // it follows the view: hidden in Raw, shown in Split
+  t.a.view('raw');
+  assert.equal(box.hidden, true);
+  t.a.view('split');
+  assert.equal(box.hidden, false);
+  // large top level is cut off, with a note
+  await t.b.type(JSON.stringify(Object.fromEntries(Array.from({ length: 350 }, (_, i) => [`k${i}`, i]))));
+  t.b.view('tree');
+  assert.equal(t.b.qa('[data-outline] .ol-item').length, 300);
+  assert.match(t.b.q('[data-outline] .ol-more').textContent, /50 more/);
+  // errors and the palette
+  await t.b.type('{broken');
+  assert.equal(t.b.q('[data-outline]').hidden, true, 'nothing to outline for an invalid document');
+  t.a.act('outline');
+  assert.equal(box.hidden, true);
+  assert.deepEqual(t.errors, []);
+});
+
+
+// ====================================================================== MD Studio parity, batch 3: file links, kept documents, caret and scroll per tab
+test('the session records what is needed to come back exactly: ids, file link, unsaved state, caret, scroll', async () => {
+  const t = await boot();
+  const log = [];
+  t.w.showOpenFilePicker = async () => [fakeHandle('doc.json', '{"a": 1, "b": 2}', log)];
+  t.a.act('open');
+  await sleep(450);
+  await t.a.type('{"a": 1, "b": 22}');
+  t.a.input.setSelectionRange(5, 9);
+  t.a.input.scrollTop = 60;
+  await sleep(700);
+  const saved = JSON.parse(t.w.sessionStorage.getItem('jsstudio.session.v1')).a;
+  assert.equal(typeof saved.id, 'string');
+  assert.equal(saved.hasHandle, true, 'knows the document is linked to a file (the handle itself is kept by the browser, not in the session)');
+  assert.equal(saved.dirty, true, 'and that it has unsaved changes');
+  assert.ok(saved.mtime > 0, 'and when the file was last seen on disk, so the overwrite warning still works');
+  assert.deepEqual(saved.sel, [5, 9]);
+  assert.equal(saved.scroll, 60);
+  assert.equal(saved.tabs.length, 1);
+  assert.equal(saved.tabs[0].id, saved.id);
+  assert.ok(!JSON.stringify(saved).includes('FileSystem'), 'no handle objects in the session');
+});
+
+test('restoring a session: text, unsaved flag, line ending, view, caret and scroll come back; a missing file link degrades to Save as', async () => {
+  const session = { a: { id: 'doc-1', text: '{"a": 1,\n "b": 2}', name: 'kept.json', view: 'raw', eol: '\r\n', hasHandle: true, mtime: 123456, dirty: true, sel: [3, 6], scroll: 40, tab: 0,
+    tabs: [{ id: 'doc-1', text: '{"a": 1,\n "b": 2}', name: 'kept.json', view: 'raw', eol: '\r\n', hasHandle: true, mtime: 123456, dirty: true, sel: [3, 6], scroll: 40 }] }, b: { text: '', name: 'Untitled' } };
+  const t = await bootSeeded(session);
+  assert.equal(t.a.input.value, '{"a": 1,\n "b": 2}');
+  assert.equal(t.a.input.selectionStart, 3);
+  assert.equal(t.a.input.selectionEnd, 6);
+  assert.equal(t.a.input.scrollTop, 40);
+  assert.equal(t.a.q('[data-name]').textContent, 'kept.json', 'no file link was found, so no unsaved marker on a link that does not exist');
+  assert.equal(t.w.document.getElementById('stEol').textContent, 'CRLF');
+  // Save has no file to write to now: it asks where
+  let asked = 0;
+  t.w.showSaveFilePicker = async (o) => { asked++; assert.equal(o.suggestedName, 'kept.json'); throw Object.assign(new Error('cancel'), { name: 'AbortError' }); };
+  t.a.q('[data-act="save"]').click();
+  await sleep(80);
+  assert.equal(asked, 1);
+});
+
+test('each tab brings back its own caret and scroll position when you switch to it', async () => {
+  const t = await boot();
+  await t.a.type('{"one": 1, "pad": "' + 'x'.repeat(50) + '"}');
+  t.a.input.setSelectionRange(4, 7);
+  t.a.input.scrollTop = 33;
+  t.a.act('newtab'); await sleep(380);
+  await t.a.type('{"two": 2}');
+  t.a.input.setSelectionRange(2, 2);
+  t.a.input.scrollTop = 5;
+  t.click(t.a.q('[data-tab="0"]')); await sleep(420);
+  assert.equal(t.a.input.selectionStart, 4);
+  assert.equal(t.a.input.selectionEnd, 7);
+  assert.equal(t.a.input.scrollTop, 33);
+  t.click(t.a.q('[data-tab="1"]')); await sleep(420);
+  assert.equal(t.a.input.selectionStart, 2);
+  assert.equal(t.a.input.scrollTop, 5);
+});
+
+test('"Keep my documents between visits": off by default and nothing stored; on stores them; a new visit restores them; off erases them', async () => {
+  const t = await boot();
+  const KEY = 'jsstudio.recover.v1';
+  await t.a.type('{"keep": "me"}');
+  await sleep(700);
+  assert.equal(t.w.localStorage.getItem(KEY), null, 'nothing is written to localStorage by default');
+  t.a.act('recent'); await sleep(60);
+  const item = () => [...t.w.document.querySelectorAll('.menu button')].find((b) => /Keep my documents/.test(b.textContent));
+  assert.match(item().textContent, /: off$/);
+  t.click(item());
+  assert.match(t.$('toast').textContent, /kept in this browser/);
+  const stored = JSON.parse(t.w.localStorage.getItem(KEY));
+  assert.equal(stored.a.text, '{"keep": "me"}', 'written at once');
+  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).keepDocs, true);
+  await t.a.type('{"keep": "more"}');
+  await sleep(700);
+  assert.equal(JSON.parse(t.w.localStorage.getItem(KEY)).a.text, '{"keep": "more"}', 'and kept up to date');
+
+  // a brand new visit (no session of its own): the kept documents come back
+  const fresh = await bootSeeded(null, { local: { [KEY]: stored.a ? { a: { ...stored.a, text: '{"restored": true}', tabs: [{ ...stored.a, text: '{"restored": true}' }] }, b: { text: '', name: 'Untitled' } } : {}, 'jsstudio.prefs.v1': { keepDocs: true } } });
+  assert.equal(fresh.a.input.value, '{"restored": true}');
+  // not opted in: the same data is ignored
+  const notOptedIn = await bootSeeded(null, { local: { [KEY]: { a: { text: '{"ignored": true}', name: 'x' }, b: { text: '', name: 'Untitled' } } } });
+  assert.equal(notOptedIn.a.input.value, '', 'without the setting, a stored copy is never loaded');
+
+  // turning it off erases the stored copy
+  t.a.act('recent'); await sleep(60);
+  t.click(item());
+  assert.equal(t.w.localStorage.getItem(KEY), null, 'erased');
+  assert.match(t.$('toast').textContent, /erased/);
+  assert.deepEqual(t.errors, []);
+});
+
+// ====================================================================== web version: browsers without the File System Access API, shared github.io storage
+test('without the File System Access API, Open uses a file input (several files, binary refused, cancel is harmless)', async () => {
+  const t = await boot(); // jsdom has no showOpenFilePicker, like Firefox and Safari
+  assert.equal(t.w.showOpenFilePicker, undefined);
+  const input = t.$('fileInput');
+  const file = (name, text) => ({ name, size: text.length, lastModified: 1000, text: async () => text });
+  const choose = async (files) => { Object.defineProperty(input, 'files', { value: files, configurable: true }); await sleep(20); input.dispatchEvent(new t.w.Event('change')); await sleep(450); };
+  t.a.act('open');
+  await choose([file('a.json', '{"a":\r\n1}'), file('pic.bin', 'x\u0000y'), file('b.json', '{"b": 2}')]);
+  assert.deepEqual(t.a.qa('[data-tabs] .tab').map((x) => x.firstChild.textContent), ['a.json', 'b.json']);
+  assert.equal(t.a.input.value, '{"b": 2}');
+  assert.match(t.$('toast').textContent, /pic\.bin looks like a binary file/);
+  t.a.act('open');
+  await sleep(20);
+  input.dispatchEvent(new t.w.Event('cancel'));
+  await sleep(100);
+  assert.equal(t.a.qa('[data-tabs] .tab').length, 2, 'cancelling opens nothing');
+  t.a.act('open'); t.a.act('open'); // a second click abandons the first dialog instead of piling up listeners
+  await choose([file('c.json', '{"c": 3}')]);
+  assert.equal(t.a.qa('[data-tabs] .tab').length, 3, 'opened once, not twice');
+  assert.ok(t.qa('[data-act="recent"]').every((b) => b.hidden), 'Recent needs file handles: hidden here');
+  assert.equal(t.$('linkExt').hidden, false, 'the web version points to the extension');
+  assert.deepEqual(t.errors, []);
+});
+
+test('without the File System Access API, Save and Save formatted download a copy (line endings kept)', async () => {
+  const t = await boot();
+  const downloads = [];
+  t.w.URL.createObjectURL = (blob) => { downloads.push({ blob }); return `blob:fake${downloads.length}`; };
+  t.w.URL.revokeObjectURL = () => {};
+  const click = t.w.HTMLAnchorElement.prototype.click;
+  t.w.HTMLAnchorElement.prototype.click = function () { downloads[downloads.length - 1].name = this.getAttribute('download'); };
+  await t.a.type('{"a": 1}');
+  t.a.act('save');
+  await sleep(100);
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].name, 'Untitled.json');
+  assert.equal(await downloads[0].blob.text(), '{"a": 1}');
+  assert.match(t.$('toast').textContent, /Downloaded Untitled\.json.*cannot save over the original file/);
+  // a CRLF document is downloaded as CRLF
+  t.$('stEol').click();
+  t.a.act('saveas');
+  await sleep(100);
+  assert.equal(await downloads[1].blob.text(), '{"a": 1}'.replace(/\n/g, '\r\n'));
+  assert.equal(t.a.q('[data-name]').textContent, 'Untitled', 'no file link is created');
+  t.a.view('preview');
+  t.a.act('save-fmt');
+  await sleep(100);
+  assert.equal(downloads[2].name, 'Untitled.formatted.json');
+  assert.match(await downloads[2].blob.text(), /^\{\r\n {2}"a": 1\r\n\}$/);
+  t.w.HTMLAnchorElement.prototype.click = click;
+  assert.deepEqual(t.errors, []);
+});
+
+test('on github.io (storage shared with other pages) documents are never kept between visits', async () => {
+  const KEY = 'jsstudio.recover.v1';
+  const t = await bootSeeded(null, { url: 'https://someone.github.io/JaySoft-JSON-Studio/app/', local: { 'jsstudio.prefs.v1': { keepDocs: true }, [KEY]: { a: { text: '{"stale": true}', name: 'x' }, b: { text: '', name: 'Untitled' } } } });
+  assert.equal(t.a.input.value, '', 'a stored copy and a stored opt-in are both ignored here');
+  t.a.q('[data-act="recent"]').click();
+  await sleep(80);
+  const item = [...t.w.document.querySelectorAll('.menu button')].find((b) => /Keep my documents/.test(b.textContent));
+  assert.match(item.textContent, /not available here/);
+  item.click();
+  assert.match(t.w.document.getElementById('toast').textContent, /shared|readable by those pages/);
+  await sleep(700);
+  assert.equal(t.w.localStorage.getItem(KEY) === null || JSON.parse(t.w.localStorage.getItem(KEY)).a.text === '{"stale": true}', true, 'nothing new was written');
+  assert.notEqual(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).keepDocs, true, 'a stored opt-in is switched off here, never honoured');
 });

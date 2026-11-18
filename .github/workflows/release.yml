@@ -12,6 +12,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      # Optional. When set, a signed .crx is built too. See README "Releases".
+      CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +49,19 @@ jobs:
         run: |
           (cd build/json-studio && zip -r -X "${GITHUB_WORKSPACE}/dist/json-studio-${GITHUB_REF_NAME}.zip" .)
           unzip -l "dist/json-studio-${GITHUB_REF_NAME}.zip"
+
+      - name: Build signed CRX
+        if: env.CRX_PRIVATE_KEY != ''
+        run: |
+          KEY_FILE="${RUNNER_TEMP}/crx-key.pem"
+          (umask 077 && printf '%s\n' "${CRX_PRIVATE_KEY}" > "${KEY_FILE}")
+          npx --yes crx3@1.1.3 -p "${KEY_FILE}" -o "dist/json-studio-${GITHUB_REF_NAME}.crx" build/json-studio
+          rm -f "${KEY_FILE}"
+          head -c 4 "dist/json-studio-${GITHUB_REF_NAME}.crx"; echo
+
+      - name: Note skipped CRX
+        if: env.CRX_PRIVATE_KEY == ''
+        run: echo "::notice::CRX_PRIVATE_KEY secret not set, publishing the zip only."
 
       - name: Checksums
         run: (cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)

@@ -22,6 +22,7 @@
     <button class="btn" id="btnSync" aria-pressed="false" title="Scroll both panes together">Sync scroll: off</button>
     <div class="spacer"></div>
     <span class="status" id="status" role="status" aria-live="polite"></span>
+    <a class="btn" id="linkExt" href="https://github.com/iamjpsonkar/JaySoft-JSON-Studio#install" target="_blank" rel="noopener" hidden title="This page is the web version. The Chrome extension also opens JSON from the pages you browse.">Get the extension</a>
     <button class="btn" id="btnPalette" title="Command palette (Ctrl/Cmd+K)">⌘K</button>
     <button class="btn" id="btnTheme" title="Theme: auto / light / dark">Auto</button>
   </header>
@@ -90,6 +91,7 @@
           <button data-view="raw" title="Raw text, as loaded (editable)">Raw</button>
           <button data-view="preview" title="Formatted and coloured (editable)">Preview</button>
           <button data-view="tree" title="Collapsible tree (double-click to edit)">Tree</button>
+          <button data-view="split" title="Raw text and tree side by side">Split</button>
         </div>
         <div class="spacer"></div>
         <button class="tb" data-act="max" title="Maximise this pane (Esc to restore)" aria-pressed="false">⤢</button>
@@ -167,6 +169,7 @@
             <button class="tb" data-act="undo" title="Undo the last tree edit (Ctrl/Cmd+Z)">↶ Undo</button>
             <button class="tb" data-act="redo" title="Redo (Ctrl/Cmd+Shift+Z)">↷ Redo</button>
             <span class="sep"></span>
+            <button class="tb" data-act="outline" aria-pressed="false" title="Show the outline: the top-level structure, click to jump">Outline</button>
             <button class="tb" data-act="expand-all" title="Expand all (limited by the render budget)">Expand</button>
             <button class="tb" data-act="collapse-all" title="Collapse all">Collapse</button>
             <select class="field" data-depth title="Expand to depth" aria-label="Expand to depth">
@@ -176,8 +179,13 @@
             <button class="tb accent" data-act="embedded" hidden title="Parse JSON stored inside string values">Expand embedded JSON</button>
             <span class="meta" data-meta-tree></span>
           </div>
-          <div class="tree" data-tree tabindex="0" aria-label="Tree view"></div>
-          <div class="query-results" data-query-box hidden></div>
+          <div class="tree-wrap">
+            <aside class="outline" data-outline hidden aria-label="Outline"></aside>
+            <div class="tree-main">
+              <div class="tree" data-tree tabindex="0" aria-label="Tree view"></div>
+              <div class="query-results" data-query-box hidden></div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -186,9 +194,14 @@
   <footer class="statusbar">
     <span id="stLeft">Ready</span>
     <div class="spacer"></div>
-    <span id="stRight"></span>
+    <button class="st-path" id="stPath" title="Path of the selected tree row (click to copy)" hidden></button>
+    <span id="stPos"></span>
+    <span id="stDoc"></span>
+    <button class="tb st-btn" id="stEol" title="Line ending of this document: click to switch (used when saving)">LF</button>
   </footer>
 
+  <input type="file" id="fileInput" multiple hidden tabindex="-1" aria-hidden="true"
+    accept=".json,.jsonc,.json5,.ndjson,.jsonl,.geojson,.txt,.log,.py,.rb,.php,.js,application/json,text/plain">
   <div class="palette-overlay" id="palette" hidden>
     <div class="palette" role="dialog" aria-label="Command palette">
       <input type="text" id="palInput" class="field" placeholder="Type a command…" autocomplete="off" spellcheck="false" aria-label="Command" aria-controls="palList">

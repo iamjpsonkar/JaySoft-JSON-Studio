@@ -13,13 +13,17 @@
   const $ = (id) => document.getElementById(id);
   const PREFS_KEY = 'jsstudio.prefs.v1';
   const SESSION_KEY = 'jsstudio.session.v1'; // sessionStorage: per tab, so several studio tabs never clash
+  const RECOVER_KEY = 'jsstudio.recover.v1'; // localStorage, only when "keep my documents" is switched on
   const PENDING_PREFIX = 'js:pending:';
+  // github.io user pages share one browser origin across every project hosted there, so anything stored here (localStorage, IndexedDB) is readable by those other pages.
+  const SHARED_ORIGIN = /\.github\.io$/i.test(location.hostname);
+  const IS_EXTENSION = location.protocol === 'chrome-extension:';
   const MAX_FILE_BYTES = 50 * 1024 * 1024;
   const TREE_BUDGET = 4000;
   const GUTTER_PX = 52; // room for the row-number gutter at the left of every tree row (matches .row::before in studio.css)
   const DIFF_BUDGET = 6000;
   const WORKER_MIN_CHARS = 200000;
-  const VIEWS = ['raw', 'preview', 'tree'];
+  const VIEWS = ['raw', 'preview', 'tree', 'split'];
   const isUntitled = (n) => /^Untitled( \d+)?$/.test(n);
   const PICKER_TYPES = [{
     description: 'JSON / text',
@@ -49,10 +53,28 @@
     if (!m) return null;
     return m[1][0] === '\t' ? 'tab' : m[1].length === 2 ? 2 : m[1].length === 4 ? 4 : null;
   }
+  /** The line ending a file uses ('\r\n' when CRLF lines outnumber bare LF lines) and whether it mixes both. */
+  function eolInfo(text) {
+    const crlf = (text.match(/\r\n/g) || []).length;
+    const lf = (text.match(/(?<!\r)\n/g) || []).length;
+    return { eol: crlf > lf ? '\r\n' : '\n', mixed: crlf > 0 && lf > 0 };
+  }
+  /** Text areas hand out '\n' only; this puts the document's own line ending back when writing it out. */
+  const withEol = (text, eol) => (eol === '\r\n' ? text.replace(/\r?\n/g, '\r\n') : text);
+  function assertText(name, text) {
+    if (text.includes('\u0000')) throw new Error(`${name} looks like a binary file, not text.`);
+  }
+  function depthOf(n) {
+    const kids = children(n);
+    let d = 0;
+    for (const [, v] of kids) d = Math.max(d, depthOf(v));
+    return kids.length ? d + 1 : 0;
+  }
   const clampRatio = (v, dflt) => (Number.isFinite(Number(v)) && v !== null ? Math.min(0.85, Math.max(0.15, Number(v))) : dflt);
   const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? '' : 's'}`;
 
   let toastTimer;
+  let statusTimer; // declared early: setActive() runs during start-up and may already ask for a status refresh
   function toast(msg, kind) {
     const t = $('toast');
     t.textContent = msg;
@@ -65,7 +87,7 @@
 
   // ------------------------------------------------------------------ prefs
   const prefs = {
-    theme: 'auto', mode: 'viewer', layout: 2, wrap: true, split: 0.5, stageSplit: 0.42, syncScroll: false, indent: '2', outStyle: 'auto', sort: false, depth: 2, ctab: 'tree',
+    theme: 'auto', mode: 'viewer', layout: 2, wrap: true, outline: false, keepDocs: false, split: 0.5, stageSplit: 0.42, syncScroll: false, indent: '2', outStyle: 'auto', sort: false, depth: 2, ctab: 'tree',
     panes: { a: { view: 'raw', picked: false }, b: { view: 'raw', picked: false } },
     cmp: { order: true, array: 'index', arrayKey: 'id', ignore: '', tol: 0, caseI: false, trim: false, missing: false, collapse: true },
   };
@@ -82,8 +104,10 @@
     prefs.stageSplit = clampRatio(prefs.stageSplit, 0.42);
     prefs.syncScroll = prefs.syncScroll === true;
     prefs.wrap = prefs.wrap !== false;
+    prefs.outline = prefs.outline === true;
+    prefs.keepDocs = prefs.keepDocs === true && !SHARED_ORIGIN;
     prefs.layout = Number(prefs.layout) === 1 ? 1 : 2;
-    for (const side of ['a', 'b']) if (!['raw', 'preview', 'tree'].includes(prefs.panes[side].view)) prefs.panes[side].view = 'raw';
+    for (const side of ['a', 'b']) if (!VIEWS.includes(prefs.panes[side].view)) prefs.panes[side].view = 'raw';
   }
   const savePrefs = () => {
     try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (err) { log('warn', 'prefs-save-failed', { error: String(err) }); }
@@ -136,13 +160,64 @@
     toast(`Copied ${what}`);
   }
 
-  async function pickFile() {
-    if (!window.showOpenFilePicker) throw new Error('This browser does not support the File System Access API.');
-    const [handle] = await window.showOpenFilePicker({ types: PICKER_TYPES, excludeAcceptAllOption: false });
-    const file = await handle.getFile();
-    if (file.size > MAX_FILE_BYTES) throw new Error(`File is too large (${fmtBytes(file.size)}, limit ${fmtBytes(MAX_FILE_BYTES)}).`);
-    log('info', 'file-picked', { name: file.name, bytes: file.size });
-    return { handle, name: file.name, text: await file.text(), mtime: file.lastModified };
+  /** Hands `text` to the browser as a file download (used where a file cannot be written in place). */
+  function downloadText(filename, text) {
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const a = h('a', { href: url, download: filename });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    log('info', 'downloaded', { name: filename, chars: text.length });
+  }
+  const MAX_PICK = 20;
+  /** Reads one file object into {name, text, mtime}; rejects oversized and binary files. */
+  async function readTextFile(file) {
+    if (file.size > MAX_FILE_BYTES) throw new Error(`${file.name} is too large (${fmtBytes(file.size)}, limit ${fmtBytes(MAX_FILE_BYTES)}).`);
+    const text = await file.text();
+    assertText(file.name, text);
+    return { name: file.name, text, mtime: file.lastModified };
+  }
+  /** Opens the file picker (several files allowed) -> {files:[{handle,name,text,mtime}], errors:[message]} */
+  let fallbackPick = null;
+  /** Browsers without the File System Access API: a plain <input type=file>. The files have no handle, so Save downloads. */
+  function pickFilesFallback() {
+    if (fallbackPick) fallbackPick(null); // a second click abandons the first dialog
+    const input = $('fileInput');
+    return new Promise((resolve) => {
+      const finish = async (list) => {
+        input.removeEventListener('change', onChange);
+        input.removeEventListener('cancel', onCancel);
+        fallbackPick = null;
+        const files = [], errors = [];
+        for (const file of (list || []).slice(0, MAX_PICK)) {
+          try { const f = await readTextFile(file); log('info', 'file-picked', { name: f.name, bytes: f.text.length, via: 'input' }); files.push(Object.assign({ handle: null }, f)); } catch (err) { errors.push(err.message || String(err)); }
+        }
+        if (list && list.length > MAX_PICK) errors.push(`Only the first ${MAX_PICK} files were opened.`);
+        resolve({ files, errors });
+      };
+      const onChange = () => finish([...input.files]);
+      const onCancel = () => finish(null);
+      fallbackPick = finish;
+      input.addEventListener('change', onChange);
+      input.addEventListener('cancel', onCancel);
+      input.value = '';
+      input.click();
+    });
+  }
+  async function pickFiles() {
+    if (!window.showOpenFilePicker) return pickFilesFallback();
+    const handles = await window.showOpenFilePicker({ types: PICKER_TYPES, excludeAcceptAllOption: false, multiple: true });
+    const files = [], errors = [];
+    for (const handle of handles.slice(0, MAX_PICK)) {
+      try {
+        const f = await readTextFile(await handle.getFile());
+        log('info', 'file-picked', { name: f.name, bytes: f.text.length });
+        files.push(Object.assign({ handle }, f));
+      } catch (err) { errors.push(err.message || String(err)); }
+    }
+    if (handles.length > MAX_PICK) errors.push(`Only the first ${MAX_PICK} files were opened.`);
+    return { files, errors };
   }
 
   async function ensurePermission(handle, mode) {
@@ -152,44 +227,88 @@
     } catch (err) { log('error', 'permission-failed', { error: String(err) }); return false; }
   }
 
-  // ------------------------------------------------------------------ recent files
-  // File handles are kept in IndexedDB (they are structured-cloneable); without IndexedDB the list lives in memory for the session.
+  // ------------------------------------------------------------------ IndexedDB: recent files and per-document file handles
+  // File handles are structured-cloneable, so they survive reloads. Without IndexedDB (or when it fails) everything lives in memory for the session.
   const RECENT_MAX = 12;
-  const recents = (() => {
-    let mem = [];
-    const idb = () => new Promise((resolve, reject) => {
-      if (typeof indexedDB === 'undefined') return reject(new Error('no indexedDB'));
-      const req = indexedDB.open('jsstudio', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('recent', { keyPath: 'name' });
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    const tx = (db, mode, fn) => new Promise((resolve, reject) => {
-      const t = db.transaction('recent', mode);
-      const out = fn(t.objectStore('recent'));
+  const HANDLE_TTL_MS = 30 * 24 * 3600 * 1000;
+  let dbPromise = null;
+  function openDb() {
+    if (!dbPromise) {
+      dbPromise = new Promise((resolve, reject) => {
+        if (typeof indexedDB === 'undefined') return reject(new Error('no indexedDB'));
+        const req = indexedDB.open('jsstudio', 2);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('recent')) db.createObjectStore('recent', { keyPath: 'name' });
+          if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
+        };
+        req.onsuccess = () => { req.result.onversionchange = () => req.result.close(); resolve(req.result); };
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => reject(new Error('the database upgrade is blocked by another studio tab'));
+      }).catch((err) => { dbPromise = null; throw err; });
+    }
+    return dbPromise;
+  }
+  async function idbRun(store, mode, fn) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(store, mode);
+      const out = fn(t.objectStore(store));
       t.oncomplete = () => resolve(out && out.result);
       t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error || new Error('transaction aborted'));
     });
+  }
+  const recents = (() => {
+    let mem = [];
     return {
       async add(handle) {
         const entry = { name: handle.name, handle, ts: Date.now() };
         mem = [entry, ...mem.filter((e) => e.name !== entry.name)].slice(0, RECENT_MAX);
         try {
-          const db = await idb();
-          await tx(db, 'readwrite', (st) => st.put(entry));
-          const all = await tx(db, 'readonly', (st) => st.getAll());
-          for (const old of all.sort((a, b) => b.ts - a.ts).slice(RECENT_MAX)) await tx(db, 'readwrite', (st) => st.delete(old.name));
+          await idbRun('recent', 'readwrite', (st) => st.put(entry));
+          const all = await idbRun('recent', 'readonly', (st) => st.getAll());
+          for (const old of all.sort((x, y) => y.ts - x.ts).slice(RECENT_MAX)) await idbRun('recent', 'readwrite', (st) => st.delete(old.name));
         } catch (err) { log('debug', 'recent-store-unavailable', { error: String(err) }); }
       },
       async list() {
-        try { const all = await tx(await idb(), 'readonly', (st) => st.getAll()); return all.sort((a, b) => b.ts - a.ts); } catch { return mem; }
+        try { const all = await idbRun('recent', 'readonly', (st) => st.getAll()); return all.sort((x, y) => y.ts - x.ts); } catch { return mem; }
       },
       async clear() {
         mem = [];
-        try { await tx(await idb(), 'readwrite', (st) => st.clear()); } catch (err) { log('debug', 'recent-clear-skipped', { error: String(err) }); }
+        try { await idbRun('recent', 'readwrite', (st) => st.clear()); } catch (err) { log('debug', 'recent-clear-skipped', { error: String(err) }); }
       },
     };
   })();
+  /** The file each open document is linked to, keyed by document id, so Save still targets the file after a reload. */
+  const handleStore = (() => {
+    const mem = new Map();
+    return {
+      async put(id, handle) {
+        mem.set(id, handle);
+        try { await idbRun('handles', 'readwrite', (st) => st.put({ handle, ts: Date.now() }, id)); } catch (err) { log('debug', 'handle-store-unavailable', { error: String(err) }); }
+      },
+      async get(id) {
+        try { const r = await idbRun('handles', 'readonly', (st) => st.get(id)); if (r && r.handle) return r.handle; } catch (err) { log('debug', 'handle-read-unavailable', { error: String(err) }); }
+        return mem.get(id) || null;
+      },
+      async remove(id) {
+        mem.delete(id);
+        try { await idbRun('handles', 'readwrite', (st) => st.delete(id)); } catch (err) { log('debug', 'handle-remove-skipped', { error: String(err) }); }
+      },
+      /** Drops links nobody has touched for 30 days (documents of studio tabs that were closed long ago). */
+      async prune() {
+        try {
+          await idbRun('handles', 'readwrite', (st) => {
+            const req = st.openCursor();
+            req.onsuccess = () => { const c = req.result; if (c) { if (Date.now() - (c.value.ts || 0) > HANDLE_TTL_MS) c.delete(); c.continue(); } };
+            return req;
+          });
+        } catch (err) { log('debug', 'handle-prune-skipped', { error: String(err) }); }
+      },
+    };
+  })();
+  const newId = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`);
 
   /** A small popup menu anchored under `anchor`; closes on outside click or Escape. items: [{label, run}] */
   let openMenu = null;
@@ -198,7 +317,7 @@
     const r = anchor.getBoundingClientRect();
     const menu = h('div', { class: 'menu', role: 'menu', style: `left:${Math.max(4, Math.min(r.left, innerWidth - 240))}px;top:${r.bottom + 4}px` });
     if (!items.length) menu.append(h('div', { class: 'empty-item', text: emptyText }));
-    for (const it of items) menu.append(it.sep ? h('div', { class: 'menu-sep', role: 'separator' }) : h('button', { role: 'menuitem', title: it.title || null, text: it.label, onclick: () => { closeMenu(); it.run(); } }));
+    for (const it of items) menu.append(it.sep ? h('div', { class: 'menu-sep', role: 'separator' }) : it.note ? h('div', { class: 'empty-item', text: it.label }) : h('button', { role: 'menuitem', title: it.title || null, text: it.label, onclick: () => { closeMenu(); it.run(); } }));
     document.body.append(menu);
     openMenu = menu;
     const first = menu.querySelector('button');
@@ -357,6 +476,7 @@
       this.text = null; this.lines = 0;
       this.find = { open: false, matches: [], idx: -1, regex: false, cs: false };
       this.releaseTab = false;
+      this.onCaret = null; // set by the pane: the caret or selection moved (status bar)
       this.wrap = false; this.rows = null; this.rowStart = null;
       this.probe = h('span', { class: 'ed-probe', 'aria-hidden': 'true', text: 'x'.repeat(50) });
       root.querySelector('.ed-main').append(this.probe);
@@ -364,7 +484,7 @@
       this.buildFindBar();
       this.ta.addEventListener('scroll', () => this.sync());
       this.ta.addEventListener('keydown', (e) => this.onKey(e));
-      for (const ev of ['keyup', 'mouseup', 'focus']) this.ta.addEventListener(ev, () => this.drawBracket());
+      for (const ev of ['keyup', 'mouseup', 'focus', 'select']) this.ta.addEventListener(ev, () => { this.drawBracket(); if (this.onCaret) this.onCaret(); });
       this.ta.addEventListener('blur', () => { this.releaseTab = false; this.brkLayer.replaceChildren(); });
     }
     sync() {
@@ -384,6 +504,7 @@
       if (this.find.open) this.runFind(false);
       this.drawBracket();
       this.sync();
+      if (this.onCaret) this.onCaret();
     }
     // ------------------------------------------------------------ word wrap and line numbers
     setWrap(on) {
@@ -631,9 +752,10 @@
       this.pinput = this.q('[data-pinput]');
       this.rawEd = new Editor(this.q('[data-editor="raw"]'), `${side}:raw`);
       this.prevEd = new Editor(this.q('[data-editor="preview"]'), `${side}:preview`);
+      this.rawEd.onCaret = this.prevEd.onCaret = () => updateStatus();
       Object.assign(this, {
-        undo: [], redo: [], selKey: null, // per-document edit history (whole-document snapshots) and the keyboard-selected tree row
-        tabs: [null], tab: 0, skipScroll: null, renaming: false,
+        docId: newId(), restoreView: null, maxDepth: null, eol: '\n', undo: [], redo: [], selKey: null, // per-document edit history (whole-document snapshots) and the keyboard-selected tree row
+        tabs: [null], tab: 0, skipScroll: null, splitSkip: null, renaming: false,
         pvKeep: null, // text typed in the Preview editor; kept as shown (not re-formatted) while it equals the raw text
         pendingEdit: null,
         text: '', res: null, seq: 0, pick: undefined, view: prefs.panes[side].view, depth: prefs.depth,
@@ -645,7 +767,7 @@
       this.rowEls = new Map();
       const conv = h('optgroup', { label: 'Export (read-only)' }, Object.entries(JSS.convert.CONVERTERS).map(([k, c]) => h('option', { value: k, text: c.label })));
       this.q('[data-f-style]').append(conv);
-      this.scheduleReload = debounce(() => this.reload(), 250);
+      this.scheduleReload = debounce(() => this.reload({ keepView: this.view === 'split' }), 250); // in Split the tree stays open while you type
       this.runSearchDebounced = debounce(() => this.runSearch(), 200);
       this.bind();
     }
@@ -694,6 +816,7 @@
           undo: () => this.undoEdit(), redo: () => this.redoEdit(),
           transform: () => showMenu(b, transformDefs(this), ''),
           wrap: () => toggleWrap(),
+          outline: () => toggleOutline(),
           max: () => setMax(maxSide === this.side ? null : this.side),
           newtab: () => this.newTab(), recent: () => this.showRecent(b),
           prev: () => this.goToMatch(this.idx - 1), next: () => this.goToMatch(this.idx + 1),
@@ -737,6 +860,7 @@
         this.resetView();
         this.render();
         this.onResult();
+        this.applyRestoreView();
         return;
       }
       setStatus('Parsing…');
@@ -745,11 +869,13 @@
       setStatus('');
       this.res = res;
       this.nodes = res.ok ? countNodes(res.node) : 0;
+      this.maxDepth = res.ok && this.nodes < 500000 ? depthOf(res.node) : null;
       this.embedded = res.ok && text.length < 3000000 ? JSS.loader.findEmbedded(res.node, 200).length : 0;
       if (!opts.keepView) this.resetView(); else if (this.term) this.runSearch(true);
       $('stLeft').textContent = res.ok ? `${this.label()}: ${res.label} · parsed in ${res.ms} ms` : `${this.label()}: parse error`;
       this.render();
       this.onResult();
+      this.applyRestoreView();
     }
 
     resetView() {
@@ -761,25 +887,48 @@
     setFile(f) {
       if (this.input.value.trim()) this.pushBlankTab(); // keep the document that is already here; the file opens in its own tab
       this.input.value = f.text;
+      const eol = eolInfo(f.text);
+      this.eol = eol.eol;
+      if (eol.mixed) { log('warn', 'mixed-eol', { pane: this.side, name: f.name }); toast(`${f.name} mixes CRLF and LF line endings. Save will write every line with ${eol.eol === '\r\n' ? 'CRLF' : 'LF'}.`); }
       if (f.handle) recents.add(f.handle);
-      this.handle = f.handle || null; this.name = f.name; this.mtime = f.mtime || 0; this.dirty = false; this.pick = undefined; this.repairInfo = null;
+      this.setHandle(f.handle || null); this.name = f.name; this.mtime = f.mtime || 0; this.dirty = false; this.pick = undefined; this.repairInfo = null;
       this.reload();
       persistSession();
     }
 
     // ---------------------------------------------------------------- tabs (several documents per pane)
     snapshot() {
-      this.tabs[this.tab] = { text: this.input.value, name: this.name, view: this.view, handle: this.handle, mtime: this.mtime, dirty: this.dirty, undo: this.undo, redo: this.redo };
+      this.tabs[this.tab] = {
+        id: this.docId, text: this.input.value, name: this.name, view: this.view, eol: this.eol, handle: this.handle, mtime: this.mtime, dirty: this.dirty, undo: this.undo, redo: this.redo,
+        sel: [this.input.selectionStart, this.input.selectionEnd], scroll: this.activeScroller().scrollTop, // caret and scroll position come back with the tab
+      };
     }
     applyDoc(d) {
-      this.input.value = d.text; this.name = d.name; this.handle = d.handle; this.mtime = d.mtime; this.dirty = d.dirty;
+      this.input.value = d.text; this.name = d.name; this.eol = d.eol === '\r\n' ? '\r\n' : '\n'; this.handle = d.handle; this.mtime = d.mtime; this.dirty = d.dirty;
+      this.docId = d.id || newId();
+      this.restoreView = d.sel || d.scroll ? { sel: d.sel, scroll: d.scroll } : null;
       this.undo = d.undo; this.redo = d.redo;
       // every tab keeps its own view: switching tabs switches Raw / Preview / Tree with it
       this.view = VIEWS.includes(d.view) ? d.view : 'raw';
       prefs.panes[this.side].view = this.view;
       this.pick = undefined; this.repairInfo = null; this.pvKeep = null; this.selKey = null;
     }
-    blankDoc() { return { text: '', name: this.nextUntitled(), view: 'raw', handle: null, mtime: 0, dirty: false, undo: [], redo: [] }; }
+    blankDoc() { return { id: newId(), text: '', name: this.nextUntitled(), view: 'raw', eol: '\n', handle: null, mtime: 0, dirty: false, undo: [], redo: [] }; }
+    /** Links (or unlinks) this document to a file on disk, remembered across reloads. */
+    setHandle(handle) {
+      this.handle = handle || null;
+      if (handle) handleStore.put(this.docId, handle); else handleStore.remove(this.docId);
+    }
+    /** After a reload() has rendered: put back the caret and scroll position that came with the tab. */
+    applyRestoreView() {
+      const r = this.restoreView;
+      if (!r) return;
+      this.restoreView = null;
+      const n = this.input.value.length;
+      try { if (r.sel) this.input.setSelectionRange(Math.min(r.sel[0], n), Math.min(r.sel[1], n)); } catch (err) { log('debug', 'restore-selection-skipped', { error: String(err) }); }
+      const sc = this.activeScroller();
+      if (sc) sc.scrollTop = r.scroll || 0;
+    }
     /** 'Untitled' for the first, then 'Untitled 2', 'Untitled 3'… (the lowest number not in use in this pane). */
     nextUntitled() {
       const used = new Set(this.tabs.map((d, i) => (i === this.tab ? this.name : d && d.name)));
@@ -808,7 +957,7 @@
           if (this.handle && !confirm(`"${this.name}" is linked to a file on disk. Renaming detaches this tab from it: Save will ask where to save "${name}".\n\nContinue?`)) { this.renderTabs(); return; }
           log('info', 'tab-rename', { pane: this.side, detached: Boolean(this.handle) });
           this.name = name;
-          if (this.handle) { this.handle = null; this.mtime = 0; }
+          if (this.handle) { this.setHandle(null); this.mtime = 0; }
           this.dirty = false;
           persistSession();
         }
@@ -839,6 +988,7 @@
       if (!this.tabs[i]) return;
       const d = i === this.tab ? { name: this.name, handle: this.handle, dirty: this.dirty } : this.tabs[i];
       if (d.dirty && d.handle && !confirm(`"${d.name}" has unsaved changes. Close it anyway?`)) return;
+      handleStore.remove(i === this.tab ? this.docId : this.tabs[i].id);
       this.snapshot();
       this.tabs.splice(i, 1);
       if (!this.tabs.length) this.tabs.push(this.blankDoc());
@@ -866,16 +1016,17 @@
     async showRecent(anchor) {
       const list = await recents.list();
       const items = list.map((e) => ({ label: e.name, title: 'Open in a new tab', run: () => this.openRecent(e) }));
+      if (!list.length) items.push({ note: true, label: 'No recent files yet. Files you open or save appear here.' });
       if (list.length) items.push({ label: 'Clear recent files', run: () => recents.clear() });
-      showMenu(anchor, items, 'No recent files yet. Files you open or save appear here.');
+      items.push({ sep: true }, { label: SHARED_ORIGIN ? 'Keep my documents between visits: not available here' : `Keep my documents between visits: ${prefs.keepDocs ? 'on' : 'off'}`, title: 'Stores the text of your open documents in this browser so they are back when you reopen the studio', run: () => setKeepDocs(!prefs.keepDocs) });
+      showMenu(anchor, items, '');
     }
     async openRecent(entry) {
       try {
         if (!(await ensurePermission(entry.handle, 'read'))) return toast('Read permission was denied.', 'error');
-        const file = await entry.handle.getFile();
-        if (file.size > MAX_FILE_BYTES) throw new Error(`File is too large (${fmtBytes(file.size)}).`);
-        log('info', 'recent-open', { pane: this.side, bytes: file.size });
-        this.setFile({ handle: entry.handle, name: file.name, text: await file.text(), mtime: file.lastModified });
+        const f = await readTextFile(await entry.handle.getFile());
+        log('info', 'recent-open', { pane: this.side, bytes: f.text.length });
+        this.setFile(Object.assign({ handle: entry.handle }, f));
       } catch (err) {
         log('error', 'recent-open-failed', { pane: this.side, error: String(err) });
         toast(`Could not open ${entry.name}: ${err.message || err}`, 'error');
@@ -908,8 +1059,17 @@
     }
 
     // ---------------------------------------------------------------- synced scrolling
-    activeScroller() { return this.view === 'raw' ? this.input : this.view === 'preview' ? this.pinput : this.q('[data-tree]'); }
+    activeScroller() { return this.view === 'raw' || this.view === 'split' ? this.input : this.view === 'preview' ? this.pinput : this.q('[data-tree]'); }
+    /** Split view: keep Raw and Tree at the same relative position (proportional; rows and lines do not map one to one). */
     onScroll(el, name) {
+      if (this.splitSkip === el) { this.splitSkip = null; return; }
+      if (this.view === 'split' && (name === 'raw' || name === 'tree')) {
+        const to = name === 'raw' ? this.q('[data-tree]') : this.input;
+        const max = el.scrollHeight - el.clientHeight, tmax = to.scrollHeight - to.clientHeight;
+        const target = max > 0 ? Math.round((el.scrollTop / max) * Math.max(0, tmax)) : 0;
+        if (Math.abs(to.scrollTop - target) > 1) { this.splitSkip = to; to.scrollTop = target; }
+        return;
+      }
       if (this.skipScroll === el) { this.skipScroll = null; return; }
       if (!prefs.syncScroll || this.view !== name) return;
       const other = panes[this.side === 'a' ? 'b' : 'a'];
@@ -953,7 +1113,7 @@
       if (this.res) {
         info.append(resultInfo(this.res, {
           goTo: (pos) => {
-            this.setView('raw', true);
+            if (this.view !== 'split') this.setView('raw', true);
             this.input.focus(); this.input.setSelectionRange(pos, pos);
             this.rawEd.scrollToLine(this.input.value.slice(0, pos).split('\n').length);
           },
@@ -963,9 +1123,11 @@
       }
       this.q('[data-name]').textContent = this.name + (this.dirty && this.handle ? ' ●' : '');
       this.qa('[data-views] button').forEach((b) => b.classList.toggle('active', b.dataset.view === this.view));
-      this.q('[data-view-raw]').hidden = this.view !== 'raw';
+      const split = this.view === 'split', treeShown = this.view === 'tree' || split;
+      this.q('.pane-body').toggleAttribute('data-split', split);
+      this.q('[data-view-raw]').hidden = !(this.view === 'raw' || split);
       this.q('[data-view-preview]').hidden = this.view !== 'preview';
-      this.q('[data-view-tree]').hidden = this.view !== 'tree';
+      this.q('[data-view-tree]').hidden = !treeShown;
       const meta = this.text ? `${fmtBytes(this.text.length)}${ok ? ` · ${plural(this.nodes, 'node')}` : ''}` : '';
       this.q('[data-meta-raw]').textContent = meta;
       this.q('[data-meta-tree]').textContent = meta;
@@ -982,8 +1144,11 @@
       this.q('[data-act="redo"]').disabled = !ok || !this.redo.length;
       this.q('[data-act="max"]').setAttribute('aria-pressed', String(maxSide === this.side));
       this.renderTabs();
-      if (this.view === 'tree') { if (this.queryOpen) this.renderQuery(); else this.renderTree(); } else if (this.view === 'preview') this.renderPreview();
-      if (this.view === 'raw') this.rawEd.sync();
+      updateStatus();
+      if (treeShown) { if (this.queryOpen) this.renderQuery(); else this.renderTree(); } else if (this.view === 'preview') this.renderPreview();
+      this.renderOutline();
+      this.q('[data-act="outline"]').setAttribute('aria-pressed', String(prefs.outline));
+      if (this.view === 'raw' || split) this.rawEd.sync();
     }
 
     refreshPreview() { if (this.view === 'preview') this.renderPreview(); }
@@ -1015,6 +1180,32 @@
       this.fmtText = ta.value;
       this.prevEd.refresh();
       this.q('[data-f-note]').textContent = out.warnings.join(' · ');
+    }
+
+    // ---------------------------------------------------------------- outline (top-level structure, click to jump)
+    renderOutline() {
+      const box = this.q('[data-outline]');
+      const show = prefs.outline && this.ok && (this.view === 'tree' || this.view === 'split');
+      box.hidden = !show;
+      if (!show) return;
+      box.replaceChildren(h('div', { class: 'outline-title', text: 'Outline' }));
+      const frag = document.createDocumentFragment();
+      const meta = (n) => (n.t === 'obj' || n.t === 'arr' ? JSS.ast.describe(n) : n.t === 'str' ? trunc(JSON.stringify(n.v), 16) : n.t === 'num' ? n.raw : n.t === 'bool' ? String(n.v) : 'null');
+      const item = (path, key, n, depth) => frag.append(h('button', { class: 'ol-item', style: `padding-left:${10 + depth * 14}px`, title: pathToString(path, { root: true }), onclick: () => this.reveal(path) },
+        h('span', { class: 'ol-key', text: typeof key === 'number' ? `[${key}]` : trunc(String(key), 28) }), h('span', { class: 'ol-meta', text: meta(n) })));
+      const LIMIT = 300, SUB = 12;
+      const top = children(this.res.node);
+      top.slice(0, LIMIT).forEach(([k, v]) => {
+        item([k], k, v, 0);
+        if (v.t === 'obj' || v.t === 'arr') {
+          const kids = children(v);
+          kids.slice(0, SUB).forEach(([k2, v2]) => item([k, k2], k2, v2, 1));
+          if (kids.length > SUB) frag.append(h('div', { class: 'ol-more', style: 'padding-left:24px', text: `… ${kids.length - SUB} more` }));
+        }
+      });
+      if (top.length > LIMIT) frag.append(h('div', { class: 'ol-more', text: `… ${(top.length - LIMIT).toLocaleString()} more at the top level` }));
+      if (!top.length) frag.append(h('div', { class: 'ol-more', text: this.res.node.t === 'obj' || this.res.node.t === 'arr' ? 'Empty' : 'A single value' }));
+      box.append(frag);
     }
 
     // ---------------------------------------------------------------- tree
@@ -1124,6 +1315,7 @@
       this.selKey = pk;
       const row = this.rowEls.get(pk);
       if (row) { row.classList.add('sel'); if (scroll) row.scrollIntoView({ block: 'nearest' }); }
+      updateStatus();
     }
 
     toggleRow(pk, open, depth) {
@@ -1378,7 +1570,7 @@
     reveal(path) {
       this.expandAncestors(path);
       this.queryOpen = false;
-      if (this.view !== 'tree') this.view = 'tree';
+      if (this.view !== 'tree' && this.view !== 'split') this.view = 'tree';
       this.render();
       const row = this.rowEls.get(pathKey(path));
       if (row) { row.scrollIntoView({ block: 'center' }); row.classList.add('flash'); }
@@ -1439,14 +1631,16 @@
     // ---------------------------------------------------------------- input actions
     clear() {
       this.pushHistory();
-      this.input.value = ''; this.handle = null; this.name = 'Untitled'; this.dirty = false; this.repairInfo = null; this.pick = undefined;
+      this.input.value = ''; this.setHandle(null); this.name = 'Untitled'; this.dirty = false; this.repairInfo = null; this.pick = undefined;
       this.reload(); persistSession(); this.input.focus();
     }
     async paste() {
       try {
-        this.input.value = await navigator.clipboard.readText();
+        const clip = await navigator.clipboard.readText();
+        if (!this.input.value.trim()) this.eol = eolInfo(clip).eol;
+        this.input.value = clip;
         this.dirty = true;
-          this.reload();
+        this.reload();
         persistSession();
       } catch {
         this.setView('raw', true);
@@ -1467,7 +1661,9 @@
     // ---------------------------------------------------------------- files
     async open() {
       try {
-        this.setFile(await pickFile());
+        const { files, errors } = await pickFiles();
+        files.forEach((f) => this.setFile(f)); // the first fills an empty tab, the others get a tab each
+        if (errors.length) toast(errors.join(' '), 'error');
       } catch (err) {
         if (err.name === 'AbortError') return;
         log('error', 'open-failed', { pane: this.side, error: String(err) });
@@ -1480,17 +1676,25 @@
       try {
         let handle = this.handle;
         if (as || !handle) {
-          if (!window.showSaveFilePicker) return toast('This browser does not support the File System Access API.', 'error');
+          if (!window.showSaveFilePicker) {
+            const name = this.name.includes('.') ? this.name : `${this.name}.json`;
+            downloadText(name, withEol(this.input.value, this.eol));
+            this.dirty = false;
+            toast(`Downloaded ${name}. This browser cannot save over the original file, so Save downloads a copy.`);
+            this.render();
+            persistSession();
+            return;
+          }
           handle = await window.showSaveFilePicker({ suggestedName: this.name.includes('.') ? this.name : `${this.name}.json`, types: PICKER_TYPES });
         } else {
           if (!(await ensurePermission(handle, 'readwrite'))) return toast('Write permission was denied.', 'error');
           const cur = await handle.getFile();
           if (this.mtime && cur.lastModified > this.mtime && !confirm(`"${this.name}" changed on disk after you opened it.\n\nOverwrite it with your version?`)) return;
         }
-        await this.write(handle, this.input.value);
+        await this.write(handle, withEol(this.input.value, this.eol));
         recents.add(handle);
-        this.handle = handle; this.name = handle.name; this.mtime = (await handle.getFile()).lastModified; this.dirty = false;
-        log('info', 'saved', { pane: this.side, name: this.name, bytes: this.input.value.length });
+        this.setHandle(handle); this.name = handle.name; this.mtime = (await handle.getFile()).lastModified; this.dirty = false;
+        log('info', 'saved', { pane: this.side, name: this.name, bytes: this.input.value.length, eol: this.eol === '\r\n' ? 'crlf' : 'lf' });
         toast(`${this.label()}: saved ${this.name}`);
         this.render();
         persistSession();
@@ -1504,11 +1708,11 @@
     async saveFormatted() {
       if (!this.fmtText) return;
       try {
-        if (!window.showSaveFilePicker) return toast('This browser does not support the File System Access API.', 'error');
         const ext = this.fmtExt();
         const base = this.name.replace(/\.[^.]*$/, '') || 'document';
+        if (!window.showSaveFilePicker) { this.download(); return toast(`${this.label()}: downloaded ${base}.formatted.${ext}`); }
         const handle = await window.showSaveFilePicker({ suggestedName: `${base}.formatted.${ext}`, types: PICKER_TYPES });
-        await this.write(handle, this.fmtText);
+        await this.write(handle, withEol(this.fmtText, this.eol));
         log('info', 'saved-formatted', { pane: this.side, bytes: this.fmtText.length });
         toast(`${this.label()}: saved ${handle.name}`);
       } catch (err) {
@@ -1530,9 +1734,7 @@
       if (!this.fmtText) return;
       const ext = this.fmtExt();
       const base = this.name.replace(/\.[^.]*$/, '') || 'document';
-      const url = URL.createObjectURL(new Blob([this.fmtText], { type: 'text/plain' }));
-      h('a', { href: url, download: `${base}.formatted.${ext}` }).click();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      downloadText(`${base}.formatted.${ext}`, withEol(this.fmtText, this.eol));
     }
   }
 
@@ -1540,6 +1742,7 @@
     if (activePane === p) return;
     activePane = p;
     Object.values(panes).forEach((x) => x.root.classList.toggle('active', x === p));
+    updateStatus();
   }
 
   loadPrefs();
@@ -1617,6 +1820,13 @@
     savePrefs();
     applyWrap();
     log('info', 'word-wrap', { on: prefs.wrap });
+  }
+
+  function toggleOutline() {
+    prefs.outline = !prefs.outline;
+    savePrefs();
+    for (const p of Object.values(panes)) p.render();
+    log('info', 'outline', { on: prefs.outline });
   }
 
   function applySync() {
@@ -1847,7 +2057,7 @@
   $('cPrev').addEventListener('click', () => gotoDiff(-1));
   function swapPanes() {
     const a = panes.a, b = panes.b;
-    for (const k of ['name', 'handle', 'mtime', 'dirty', 'undo', 'redo']) [a[k], b[k]] = [b[k], a[k]];
+    for (const k of ['docId', 'name', 'handle', 'mtime', 'dirty', 'undo', 'redo', 'eol']) [a[k], b[k]] = [b[k], a[k]];
     [a.input.value, b.input.value] = [b.input.value, a.input.value];
     a.pvKeep = b.pvKeep = null; a.selKey = b.selKey = null;
     a.reload(); b.reload();
@@ -1961,34 +2171,118 @@
   darkQuery.addEventListener('change', applyTheme);
   $('btnTheme').addEventListener('click', () => { prefs.theme = THEMES[(THEMES.indexOf(prefs.theme) + 1) % THEMES.length]; savePrefs(); applyTheme(); });
 
+  const MAX_RECOVER_CHARS = 4500000; // stay well under the ~5 MB localStorage quota
   function persistSessionNow() {
     const cap = (t) => (t.length > 1500000 ? '' : t);
+    const entry = (d) => ({
+      id: d.id, text: cap(d.text), name: d.name, view: d.view, eol: d.eol, hasHandle: Boolean(d.handle), mtime: d.mtime || 0, dirty: Boolean(d.dirty),
+      sel: d.sel || [0, 0], scroll: d.scroll || 0,
+    });
     const payload = {};
     for (const side of ['a', 'b']) {
       const p = panes[side];
       p.snapshot();
-      payload[side] = { text: cap(p.input.value), name: p.name, tab: p.tab, view: p.view, tabs: p.tabs.map((d) => ({ text: cap(d.text), name: d.name, view: d.view })) };
+      payload[side] = Object.assign(entry(p.tabs[p.tab]), { tab: p.tab, tabs: p.tabs.map(entry) });
     }
-    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload)); } catch (err) { log('warn', 'session-persist-failed', { error: String(err) }); }
+    const json = JSON.stringify(payload);
+    try { sessionStorage.setItem(SESSION_KEY, json); } catch (err) { log('warn', 'session-persist-failed', { error: String(err) }); }
+    if (prefs.keepDocs) {
+      if (json.length > MAX_RECOVER_CHARS) { log('warn', 'recover-too-large', { chars: json.length }); return; }
+      try { localStorage.setItem(RECOVER_KEY, json); } catch (err) { log('warn', 'recover-persist-failed', { error: String(err) }); }
+    }
   }
   const persistSession = debounce(persistSessionNow, 500);
+
+  /** Opt-in: also keep the open documents in localStorage, so they are back after the studio tab was closed. */
+  const KEEP_BLOCKED = 'Not available on github.io: every project hosted under the same github.io account shares this browser storage, so your documents would be readable by those pages. Use the Chrome extension for this, or save your files.';
+  function setKeepDocs(on) {
+    if (on && SHARED_ORIGIN) { toast(KEEP_BLOCKED, 'error'); log('warn', 'keep-docs-blocked-shared-origin', {}); return; }
+    prefs.keepDocs = on;
+    savePrefs();
+    if (on) { persistSessionNow(); toast('Your open documents are now kept in this browser and come back the next time you open the studio. Switch it off here to erase them.'); }
+    else { try { localStorage.removeItem(RECOVER_KEY); } catch (err) { log('warn', 'recover-clear-failed', { error: String(err) }); } toast('Stopped keeping documents between visits; the stored copy was erased.'); }
+    log('info', 'keep-docs', { on });
+  }
+
+  function toDoc(d) {
+    const sel = Array.isArray(d.sel) && d.sel.length === 2 ? [Number(d.sel[0]) || 0, Number(d.sel[1]) || 0] : [0, 0];
+    return {
+      id: typeof d.id === 'string' && d.id ? d.id : newId(), text: String(d.text || ''), name: d.name || 'Untitled', view: VIEWS.includes(d.view) ? d.view : 'raw',
+      eol: d.eol === '\r\n' ? '\r\n' : '\n', handle: null, hasHandle: Boolean(d.hasHandle), mtime: Number(d.mtime) || 0, dirty: Boolean(d.dirty), sel, scroll: Number(d.scroll) || 0, undo: [], redo: [],
+    };
+  }
+  /** Rebuilds both panes (tabs, text, view, caret, scroll) from this tab's session, or from the kept copy when the tab is new. */
   function restoreSession() {
     try {
-      const s = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+      let raw = sessionStorage.getItem(SESSION_KEY), source = 'session';
+      if (!raw && prefs.keepDocs) { raw = localStorage.getItem(RECOVER_KEY); source = 'kept'; }
+      const s = JSON.parse(raw || 'null');
       if (!s) return;
       for (const side of ['a', 'b']) {
         const p = s[side] || {};
-        panes[side].input.value = p.text || '';
-        panes[side].name = p.name || 'Untitled';
-        if (Array.isArray(p.tabs) && p.tabs.length > 1) {
-          panes[side].tabs = p.tabs.map((d) => ({ text: String(d.text || ''), name: d.name || 'Untitled', view: VIEWS.includes(d.view) ? d.view : 'raw', handle: null, mtime: 0, dirty: false, undo: [], redo: [] }));
-          panes[side].tab = Math.min(Math.max(0, Number(p.tab) || 0), panes[side].tabs.length - 1);
-          panes[side].view = panes[side].tabs[panes[side].tab].view;
-        }
+        const docs = (Array.isArray(p.tabs) && p.tabs.length ? p.tabs : [p]).map(toDoc);
+        const pane = panes[side];
+        pane.tabs = docs;
+        pane.tab = Math.min(Math.max(0, Number(p.tab) || 0), docs.length - 1);
+        const cur = docs[pane.tab];
+        pane.input.value = cur.text; pane.name = cur.name; pane.eol = cur.eol; pane.view = cur.view; pane.docId = cur.id; pane.dirty = cur.dirty; pane.mtime = cur.mtime;
+        pane.restoreView = { sel: cur.sel, scroll: cur.scroll };
       }
-      log('info', 'session-restored', {});
+      log('info', 'session-restored', { source });
     } catch (err) { log('warn', 'session-restore-failed', { error: String(err) }); }
   }
+  /** Re-attaches the file each restored document was linked to (the browser keeps the handles, the session only knows ids). */
+  async function restoreHandles() {
+    for (const pane of Object.values(panes)) {
+      for (let i = 0; i < pane.tabs.length; i++) {
+        const d = pane.tabs[i];
+        if (!d || !d.hasHandle) continue;
+        const handle = await handleStore.get(d.id);
+        if (handle) { d.handle = handle; if (i === pane.tab) pane.handle = handle; } else {
+          log('warn', 'handle-missing', { pane: pane.side, tab: i });
+          d.hasHandle = false; d.mtime = 0;
+          if (i === pane.tab) pane.mtime = 0;
+        }
+      }
+    }
+  }
+
+  // ====================================================================== status bar (position, selection, path, document stats, line ending)
+  function updateStatusNow() {
+    const p = activePane || panes.a;
+    const L = p.label();
+    // caret / selection of the editor in use
+    let pos = '';
+    if (p.view !== 'tree') {
+      const ta = p.view === 'preview' ? p.pinput : p.input;
+      const a = ta.selectionStart, b = ta.selectionEnd, before = ta.value.slice(0, a);
+      let line = 1;
+      for (let i = before.indexOf('\n'); i !== -1; i = before.indexOf('\n', i + 1)) line++;
+      const col = a - (before.lastIndexOf('\n') + 1) + 1;
+      pos = `${L} · Ln ${line.toLocaleString()}, Col ${col.toLocaleString()}${b > a ? ` (${(b - a).toLocaleString()} selected)` : ''}`;
+    } else pos = L;
+    $('stPos').textContent = pos;
+    // the selected tree row
+    const path = $('stPath');
+    let pathText = '';
+    if (p.selKey && p.ok && (p.view === 'tree' || p.view === 'split')) { try { pathText = pathToString(JSON.parse(p.selKey), { root: true }); } catch { pathText = ''; } }
+    path.textContent = pathText;
+    path.hidden = !pathText;
+    // the document
+    const len = p.input.value.length;
+    $('stDoc').textContent = !len ? '' : p.ok ? `${p.res.label} · ${fmtBytes(len)} · ${plural(p.nodes, 'node')}${p.maxDepth !== null ? ` · depth ${p.maxDepth}` : ''}` : 'parse error';
+    $('stEol').textContent = p.eol === '\r\n' ? 'CRLF' : 'LF';
+  }
+  function updateStatus() { clearTimeout(statusTimer); statusTimer = setTimeout(updateStatusNow, 40); }
+  $('stEol').addEventListener('click', () => {
+    const p = activePane || panes.a;
+    p.eol = p.eol === '\r\n' ? '\n' : '\r\n';
+    if (p.input.value) { p.dirty = true; p.render(); persistSession(); }
+    log('info', 'eol-changed', { pane: p.side, eol: p.eol === '\r\n' ? 'crlf' : 'lf' });
+    toast(`${p.label()}: lines will be saved with ${p.eol === '\r\n' ? 'CRLF' : 'LF'} endings`);
+    updateStatusNow();
+  });
+  $('stPath').addEventListener('click', () => copyText($('stPath').textContent, 'path'));
 
   // ====================================================================== command palette (Ctrl/Cmd+K)
   const pal = { items: [], sel: 0, prev: null };
@@ -2003,7 +2297,7 @@
     const hasText = Boolean(p.input.value);
     const cmds = [];
     const add = (title, run, o) => cmds.push(Object.assign({ title, run }, o));
-    for (const [v, name] of [['raw', 'Raw'], ['preview', 'Preview'], ['tree', 'Tree']]) add(`${L}: show ${name}`, () => p.setView(v, true), { hint: 'view', enabled: p.view !== v });
+    for (const [v, name] of [['raw', 'Raw'], ['preview', 'Preview'], ['tree', 'Tree'], ['split', 'Split']]) add(`${L}: show ${name}`, () => p.setView(v, true), { hint: 'view', enabled: p.view !== v });
     add(`${L}: open file…`, () => p.open(), { hint: 'file' });
     add(`${L}: recent files…`, () => p.showRecent(p.q('[data-act="recent"]')), { hint: 'file' });
     add(`${L}: paste from clipboard`, () => p.paste(), { hint: 'file' });
@@ -2015,6 +2309,7 @@
     add(`${L}: copy raw text`, () => copyText(p.input.value, 'raw text'), { hint: 'copy', enabled: hasText });
     add(`${L}: copy formatted output`, () => { if (p.view !== 'preview') p.setView('preview', true); copyText(p.fmtText, 'formatted output'); }, { hint: 'copy', enabled: p.ok });
     add(prefs.wrap ? 'Word wrap: turn off' : 'Word wrap: turn on', toggleWrap, { hint: 'view' });
+    add(prefs.outline ? 'Outline: hide' : 'Outline: show', toggleOutline, { hint: 'view' });
     add(`${L}: find and replace`, () => { if (p.view === 'tree') p.setView('raw', true); (p.view === 'preview' ? p.prevEd : p.rawEd).openFind(); }, { hint: 'Ctrl/Cmd+F' });
     add(`${L}: undo edit`, () => p.undoEdit(), { hint: 'Ctrl/Cmd+Z in tree', enabled: p.undo.length > 0 });
     add(`${L}: redo edit`, () => p.redoEdit(), { hint: 'Ctrl/Cmd+Shift+Z', enabled: p.redo.length > 0 });
@@ -2033,6 +2328,7 @@
     add('Layout: reset pane sizes', () => { prefs.split = 0.5; prefs.stageSplit = 0.42; applyRatios(); applyStage(); savePrefs(); }, { hint: 'layout' });
     add('Swap A and B', swapPanes, { hint: 'panes' });
     add(prefs.syncScroll ? 'Turn off synced scrolling' : 'Turn on synced scrolling', () => $('btnSync').click(), { hint: 'panes' });
+    add(prefs.keepDocs ? 'Keep my documents between visits: turn off (erases the stored copy)' : 'Keep my documents between visits: turn on', () => setKeepDocs(!prefs.keepDocs), { hint: 'privacy' });
     add('Theme: cycle auto / light / dark', () => $('btnTheme').click(), { hint: 'theme' });
     for (const [k, name] of [['auto', 'same as input'], ['json', 'JSON'], ['python', 'Python'], ['js', 'JavaScript / JSON5'], ...Object.entries(JSS.convert.CONVERTERS).map(([key, c]) => [key, c.label])]) add(`Preview format: ${name}`, () => setFormat({ outStyle: k }), { hint: 'format', enabled: prefs.outStyle !== k });
     for (const [k, name] of [['2', '2 spaces'], ['4', '4 spaces'], ['tab', 'tab'], ['0', 'minified']]) add(`Preview indent: ${name}`, () => setFormat({ indent: k }), { hint: 'format', enabled: prefs.indent !== k });
@@ -2110,9 +2406,9 @@
         const handle = await p.handle;
         if (handle && handle.kind === 'directory') { toast('Folders are not supported, drop files instead.', 'error'); continue; }
         const file = handle ? await handle.getFile() : p.file;
-        if (file.size > MAX_FILE_BYTES) { toast(`${file.name} is too large (${fmtBytes(file.size)}).`, 'error'); continue; }
-        loaded.push({ handle: handle && handle.kind === 'file' ? handle : null, name: file.name, text: await file.text(), mtime: file.lastModified });
-      } catch (err) { log('error', 'drop-failed', { error: String(err) }); toast(`Could not read the file: ${err.message || err}`, 'error'); }
+        const f = await readTextFile(file);
+        loaded.push(Object.assign({ handle: handle && handle.kind === 'file' ? handle : null }, f));
+      } catch (err) { log('error', 'drop-failed', { error: String(err) }); toast(`Could not open the file: ${err.message || err}`, 'error'); }
     }
     if (!loaded.length) return;
     const twoPanes = prefs.mode === 'compare' || prefs.layout === 2;
@@ -2143,6 +2439,7 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       if (text.length > MAX_FILE_BYTES) throw new Error('File is larger than the 50 MB limit.');
+      assertText('This file', text);
       panes.a.setFile({ text, name: decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || 'document.json') });
     } catch (err) {
       log('error', 'open-url-failed', { error: String(err) });
@@ -2161,6 +2458,10 @@
     } else if (mod && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       if ($('palette').hidden) openPalette(); else closePalette(true);
+    } else if (mod && e.key.toLowerCase() === 'e') {
+      e.preventDefault();
+      const p = activePane || panes.a;
+      p.setView(VIEWS[(VIEWS.indexOf(p.view) + 1) % VIEWS.length], true);
     } else if (e.key === 'Escape' && maxSide && $('palette').hidden && !openMenu) setMax(null);
   });
 
@@ -2172,11 +2473,15 @@
     $('oTol').value = o.tol; $('oCase').checked = o.caseI; $('oTrim').checked = o.trim; $('oMissing').checked = o.missing; $('cCollapse').checked = o.collapse;
     $('oArrayKey').hidden = o.array !== 'key';
     for (const p of Object.values(panes)) p.q('[data-depth]').value = String(p.depth);
+    if (!IS_EXTENSION) $('linkExt').hidden = false;
+    if (!window.showOpenFilePicker) for (const b of document.querySelectorAll('[data-act="recent"]')) b.hidden = true; // no file handles to remember here
     applyTheme();
     applyRatios();
     applySync();
     applyWrap();
     restoreSession();
+    await restoreHandles();
+    handleStore.prune();
     setMode(prefs.mode);
 
     const params = new URLSearchParams(location.search);
