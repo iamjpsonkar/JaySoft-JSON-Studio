@@ -76,6 +76,27 @@
     return null;
   }
 
-  JSS.editing = { enter, tab, matchBracket, bracketPair };
+  /**
+   * Visual rows each logical line takes when soft-wrapped at `cols` columns in a monospace font
+   * (a hard break at the column, tabs advance to the next tab stop). Returns an array, one entry per line.
+   */
+  function displayWidth(line, tabSize) {
+    const ts = tabSize || 2;
+    if (line.indexOf('\t') === -1) return line.length;
+    let w = 0;
+    for (let j = 0; j < line.length; j++) w += line[j] === '\t' ? ts - (w % ts) : 1;
+    return w;
+  }
+  function wrapRows(text, cols, tabSize) {
+    const lines = text.split('\n');
+    const rows = new Array(lines.length);
+    for (let i = 0; i < lines.length; i++) {
+      const w = displayWidth(lines[i], tabSize);
+      rows[i] = cols < 1 || w === 0 ? 1 : Math.max(1, Math.ceil(w / cols));
+    }
+    return rows;
+  }
+
+  JSS.editing = { enter, tab, matchBracket, bracketPair, wrapRows, displayWidth };
   if (typeof module !== 'undefined' && module.exports) module.exports = JSS;
 })(typeof self !== 'undefined' ? self : globalThis);

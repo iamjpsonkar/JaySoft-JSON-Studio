@@ -111,6 +111,11 @@ body.resizing { user-select: none; }
 .editor textarea::placeholder { color: var(--muted); }
 .editor textarea::selection { color: transparent; background: color-mix(in srgb, var(--accent) 32%, transparent); }
 .editor.plain textarea { color: var(--text); }
+/* the layers have no scrollbar: --sbw (set from the textarea) keeps their text width equal to the textarea's, so wrapping matches */
+.ed-hl, .ed-find, .ed-brk { padding-right: calc(14px + var(--sbw, 0px)); }
+.ed-probe { position: absolute; left: 0; top: 0; visibility: hidden; pointer-events: none; white-space: pre; font: 13px/20px var(--mono); }
+.editor[data-wrap="on"] .ed-hl, .editor[data-wrap="on"] .ed-find, .editor[data-wrap="on"] .ed-brk, .editor[data-wrap="on"] textarea { white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
+.editor[data-wrap="on"] textarea { overflow-x: hidden; }
 .editor.plain .ed-hl, .editor.plain .ed-find, .editor.plain .ed-brk { display: none; }
 .toolbar2 { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border-bottom: 1px solid var(--border); background: var(--surface); flex-wrap: wrap; }
 .toolbar2 label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }

@@ -67,7 +67,7 @@ Every pane opens in Raw so you can paste JSON straight in; loading content never
 
 ### Editors (Raw and Preview)
 
-Line numbers and colours; **Find / replace** (`Ctrl/Cmd+F` or **Find**) with match case, regular expressions (`$1` in replacements), match highlighting, next / previous, replace one / all; bracket-pair highlighting; Enter keeps the indentation and adds a level after `{`, `[`, `(`; Tab / Shift+Tab indent and outdent (press `Esc` first to Tab out of the editor). Above 200,000 characters the editors drop colours and highlighting and stay plain. There is no code folding in the editors (use the Tree to fold).
+Line numbers and colours; **word wrap** (on by default; the **Wrap** button in the Raw and Preview toolbars or the palette switches it for every editor, and the choice is remembered): a wrapped line keeps its number on its first row and the continuation rows stay blank, and the numbers re-flow when you resize a pane. The row count assumes a monospace font, so very wide characters (CJK, some emoji) can make a number drift on the lines that contain them; **Find / replace** (`Ctrl/Cmd+F` or **Find**) with match case, regular expressions (`$1` in replacements), match highlighting, next / previous, replace one / all; bracket-pair highlighting; Enter keeps the indentation and adds a level after `{`, `[`, `(`; Tab / Shift+Tab indent and outdent (press `Esc` first to Tab out of the editor). Above 200,000 characters the editors drop colours and highlighting and stay plain. There is no code folding in the editors (use the Tree to fold).
 
 ### Tree keyboard
 

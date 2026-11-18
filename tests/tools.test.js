@@ -131,3 +131,15 @@ test('validate: unknown keywords are reported as ignored; errors are capped; cir
   assert.equal(circ.valid, false);
   assert.match(circ.errors[0].message, /too deep/);
 });
+
+test('wrapRows: visual rows per logical line for soft wrap (monospace, hard break at the column, tab stops)', () => {
+  const { wrapRows } = JSS.editing;
+  assert.deepEqual(wrapRows('a\n\nbbbb', 10), [1, 1, 1]);
+  assert.deepEqual(wrapRows('x'.repeat(10), 10), [1], 'exactly one row when it fits');
+  assert.deepEqual(wrapRows('x'.repeat(11), 10), [2]);
+  assert.deepEqual(wrapRows(`${'x'.repeat(25)}\nshort\n${'y'.repeat(20)}`, 10), [3, 1, 2]);
+  assert.deepEqual(wrapRows('\t\tx', 3, 2), [2], 'tabs advance to tab stops: 2 + 2 + 1 = 5 columns');
+  assert.deepEqual(wrapRows('abc\tx', 100, 2), [1]);
+  assert.deepEqual(wrapRows('', 10), [1]);
+  assert.deepEqual(wrapRows('abc', 0), [1], 'an unmeasurable width never produces zero or infinite rows');
+});

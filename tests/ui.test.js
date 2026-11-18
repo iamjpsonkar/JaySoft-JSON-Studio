@@ -1337,3 +1337,25 @@ test('transforms need a valid document; the palette offers them for the pane in 
   key(t.w, t.$('palInput'), 'Escape');
   assert.deepEqual(t.errors, []);
 });
+
+test('word wrap: on by default, one toggle for every editor, remembered, also in the palette', async () => {
+  const t = await boot();
+  const eds = () => t.qa('.editor');
+  assert.equal(eds().length, 4, 'Raw and Preview in both panes');
+  assert.ok(eds().every((e) => e.dataset.wrap === 'on' && e.querySelector('textarea').getAttribute('wrap') === 'soft'), 'wrapping by default');
+  assert.ok(t.qa('[data-act="wrap"]').every((b) => b.getAttribute('aria-pressed') === 'true'));
+  t.a.act('wrap');
+  assert.ok(eds().every((e) => e.dataset.wrap === 'off' && e.querySelector('textarea').getAttribute('wrap') === 'off'), 'the button switches all editors, in both panes');
+  assert.ok(t.qa('[data-act="wrap"]').every((b) => b.getAttribute('aria-pressed') === 'false'));
+  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).wrap, false);
+  const t2 = await boot({ prefs: JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')) });
+  assert.equal(t2.qa('.editor')[0].dataset.wrap, 'off', 'remembered');
+  t2.w.document.dispatchEvent(new t2.w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+  t2.$('palInput').value = 'word wrap'; t2.$('palInput').dispatchEvent(new t2.w.Event('input'));
+  assert.deepEqual([...t2.w.document.querySelectorAll('#palList li')].map((l) => l.firstChild.textContent), ['Word wrap: turn on']);
+  key(t2.w, t2.$('palInput'), 'Enter');
+  assert.equal(t2.qa('.editor')[0].dataset.wrap, 'on');
+  const css = fs.readFileSync(path.join(ROOT, 'studio.css'), 'utf8');
+  assert.match(css, /\.editor\[data-wrap="on"\] textarea \{ white-space: pre-wrap/);
+  assert.deepEqual(t.errors, []);
+});

@@ -65,7 +65,7 @@
 
   // ------------------------------------------------------------------ prefs
   const prefs = {
-    theme: 'auto', mode: 'viewer', layout: 2, split: 0.5, stageSplit: 0.42, syncScroll: false, indent: '2', outStyle: 'auto', sort: false, depth: 2, ctab: 'tree',
+    theme: 'auto', mode: 'viewer', layout: 2, wrap: true, split: 0.5, stageSplit: 0.42, syncScroll: false, indent: '2', outStyle: 'auto', sort: false, depth: 2, ctab: 'tree',
     panes: { a: { view: 'raw', picked: false }, b: { view: 'raw', picked: false } },
     cmp: { order: true, array: 'index', arrayKey: 'id', ignore: '', tol: 0, caseI: false, trim: false, missing: false, collapse: true },
   };
@@ -81,6 +81,7 @@
     prefs.split = clampRatio(prefs.split, 0.5);
     prefs.stageSplit = clampRatio(prefs.stageSplit, 0.42);
     prefs.syncScroll = prefs.syncScroll === true;
+    prefs.wrap = prefs.wrap !== false;
     prefs.layout = Number(prefs.layout) === 1 ? 1 : 2;
     for (const side of ['a', 'b']) if (!['raw', 'preview', 'tree'].includes(prefs.panes[side].view)) prefs.panes[side].view = 'raw';
   }
@@ -326,6 +327,7 @@
 
   // ====================================================================== code editor (line numbers, colours, find, brackets)
   const EDITOR_HL_MAX = 200000; // beyond this the colour layers are dropped and the textarea shows plain text
+  const EDITOR_PAD_X = 14; // horizontal padding of the textarea and its layers (studio.css)
   const LINE_H = 20; // must match line-height in studio.css (.ed-gutter, .ed-hl, .editor textarea)
 
   /** Draws `ranges` ([{start,end,cls?}], sorted, non-overlapping) as <mark>s over a copy of `text` in `pre`. */
@@ -355,6 +357,10 @@
       this.text = null; this.lines = 0;
       this.find = { open: false, matches: [], idx: -1, regex: false, cs: false };
       this.releaseTab = false;
+      this.wrap = false; this.rows = null; this.rowStart = null;
+      this.probe = h('span', { class: 'ed-probe', 'aria-hidden': 'true', text: 'x'.repeat(50) });
+      root.querySelector('.ed-main').append(this.probe);
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => this.relayout()).observe(this.ta);
       this.buildFindBar();
       this.ta.addEventListener('scroll', () => this.sync());
       this.ta.addEventListener('keydown', (e) => this.onKey(e));
@@ -371,12 +377,7 @@
       const text = this.ta.value;
       if (text === this.text) return;
       this.text = text;
-      let n = 1;
-      for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) n++;
-      if (n !== this.lines) {
-        this.lines = n;
-        this.gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n');
-      }
+      this.renumber();
       const plain = text.length > EDITOR_HL_MAX;
       this.root.classList.toggle('plain', plain);
       if (plain) this.hl.replaceChildren(); else highlightInto(this.hl, text);
@@ -384,7 +385,63 @@
       this.drawBracket();
       this.sync();
     }
-    scrollToLine(line) { this.ta.scrollTop = Math.max(0, (line - 4) * LINE_H); }
+    // ------------------------------------------------------------ word wrap and line numbers
+    setWrap(on) {
+      this.wrap = on;
+      this.root.dataset.wrap = on ? 'on' : 'off';
+      this.ta.setAttribute('wrap', on ? 'soft' : 'off');
+      this.relayout();
+    }
+    /** Characters per visual row (0 when not wrapping or not measurable, e.g. the view is hidden). */
+    cols() {
+      if (!this.wrap) return 0;
+      const cw = this.probe.getBoundingClientRect().width / 50;
+      const avail = this.ta.clientWidth - 2 * EDITOR_PAD_X;
+      return cw > 0 && avail > 0 ? Math.max(1, Math.floor(avail / cw + 1e-6)) : 0;
+    }
+    /** Width or visibility changed: re-measure the scrollbar and renumber (wrapped lines take several rows). */
+    relayout() {
+      this.root.style.setProperty('--sbw', `${Math.max(0, this.ta.offsetWidth - this.ta.clientWidth)}px`);
+      this.renumber();
+      this.sync();
+    }
+    /** Line numbers: one per logical line; with wrap on, the continuation rows of a long line are left blank so numbers stay level with their text. */
+    renumber() {
+      const text = this.ta.value, cols = this.cols();
+      if (cols) {
+        const rows = JSS.editing.wrapRows(text, cols, 2);
+        const same = this.rows && this.rows.length === rows.length && rows.every((r, i) => r === this.rows[i]);
+        this.rows = rows;
+        if (same) return;
+        const start = new Array(rows.length);
+        const parts = new Array(rows.length);
+        let acc = 0;
+        for (let i = 0; i < rows.length; i++) { start[i] = acc; acc += rows[i]; parts[i] = String(i + 1) + '\n'.repeat(rows[i] - 1); }
+        this.rowStart = start;
+        this.gutter.textContent = parts.join('\n');
+        this.lines = -1;
+        return;
+      }
+      let n = 1;
+      for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) n++;
+      if (n !== this.lines || this.rows) {
+        this.lines = n;
+        this.gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n');
+      }
+      this.rows = null; this.rowStart = null;
+    }
+    /** Visual row (0-based) of text position `pos`. */
+    visualRow(pos) {
+      const value = this.ta.value, line = this.lineOf(pos);
+      if (!this.rows) return line - 1;
+      const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+      const cols = this.cols() || 1;
+      return this.rowStart[line - 1] + Math.floor(JSS.editing.displayWidth(value.slice(lineStart, pos), 2) / cols);
+    }
+    scrollToLine(line) {
+      const row = this.rows ? this.rowStart[Math.min(line, this.rows.length) - 1] : line - 1;
+      this.ta.scrollTop = Math.max(0, (row - 3) * LINE_H);
+    }
     lineOf(pos) { let n = 1; for (let i = this.ta.value.indexOf('\n'); i !== -1 && i < pos; i = this.ta.value.indexOf('\n', i + 1)) n++; return n; }
 
     // ------------------------------------------------------------ brackets
@@ -492,8 +549,7 @@
       if (reveal && f.idx >= 0) {
         const m = f.matches[f.idx];
         this.ta.setSelectionRange(m.start, m.end);
-        const line = this.lineOf(m.start);
-        const top = (line - 1) * LINE_H;
+        const top = this.visualRow(m.start) * LINE_H;
         if (top < this.ta.scrollTop || top > this.ta.scrollTop + this.ta.clientHeight - 3 * LINE_H) this.ta.scrollTop = Math.max(0, top - this.ta.clientHeight / 2);
       }
       this.sync();
@@ -637,6 +693,7 @@
           'find-raw': () => this.rawEd.openFind(), 'find-preview': () => this.prevEd.openFind(),
           undo: () => this.undoEdit(), redo: () => this.redoEdit(),
           transform: () => showMenu(b, transformDefs(this), ''),
+          wrap: () => toggleWrap(),
           max: () => setMax(maxSide === this.side ? null : this.side),
           newtab: () => this.newTab(), recent: () => this.showRecent(b),
           prev: () => this.goToMatch(this.idx - 1), next: () => this.goToMatch(this.idx + 1),
@@ -1551,6 +1608,17 @@
     log('info', 'maximise', { pane: side });
   }
 
+  function applyWrap() {
+    for (const p of Object.values(panes)) { p.rawEd.setWrap(prefs.wrap); p.prevEd.setWrap(prefs.wrap); }
+    for (const b of document.querySelectorAll('[data-act="wrap"]')) b.setAttribute('aria-pressed', String(prefs.wrap));
+  }
+  function toggleWrap() {
+    prefs.wrap = !prefs.wrap;
+    savePrefs();
+    applyWrap();
+    log('info', 'word-wrap', { on: prefs.wrap });
+  }
+
   function applySync() {
     const b = $('btnSync');
     b.setAttribute('aria-pressed', String(prefs.syncScroll));
@@ -1946,6 +2014,7 @@
     add(`${L}: apply format to raw text`, () => p.applyFormat(), { hint: 'edit', enabled: p.ok });
     add(`${L}: copy raw text`, () => copyText(p.input.value, 'raw text'), { hint: 'copy', enabled: hasText });
     add(`${L}: copy formatted output`, () => { if (p.view !== 'preview') p.setView('preview', true); copyText(p.fmtText, 'formatted output'); }, { hint: 'copy', enabled: p.ok });
+    add(prefs.wrap ? 'Word wrap: turn off' : 'Word wrap: turn on', toggleWrap, { hint: 'view' });
     add(`${L}: find and replace`, () => { if (p.view === 'tree') p.setView('raw', true); (p.view === 'preview' ? p.prevEd : p.rawEd).openFind(); }, { hint: 'Ctrl/Cmd+F' });
     add(`${L}: undo edit`, () => p.undoEdit(), { hint: 'Ctrl/Cmd+Z in tree', enabled: p.undo.length > 0 });
     add(`${L}: redo edit`, () => p.redoEdit(), { hint: 'Ctrl/Cmd+Shift+Z', enabled: p.redo.length > 0 });
@@ -2106,6 +2175,7 @@
     applyTheme();
     applyRatios();
     applySync();
+    applyWrap();
     restoreSession();
     setMode(prefs.mode);
 
