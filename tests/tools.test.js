@@ -143,3 +143,12 @@ test('wrapRows: visual rows per logical line for soft wrap (monospace, hard brea
   assert.deepEqual(wrapRows('', 10), [1]);
   assert.deepEqual(wrapRows('abc', 0), [1], 'an unmeasurable width never produces zero or infinite rows');
 });
+
+test('editing: bracket matching can ignore quotes (prose: an apostrophe is not a string)', () => {
+  const { matchBracket, bracketPair } = JSS.editing;
+  const prose = "it's (see [the docs]) and don't";
+  assert.equal(matchBracket(prose, prose.indexOf('(')), -1, "with string awareness the two apostrophes hide the brackets, as intended for JSON");
+  assert.equal(matchBracket(prose, prose.indexOf('('), { strings: false }), prose.indexOf(')'));
+  assert.deepEqual(bracketPair(prose, prose.indexOf('[') + 1, { strings: false }), [prose.indexOf('['), prose.indexOf(']')]);
+  assert.equal(matchBracket('{"a": "}"}', 0), 9, 'default behaviour is unchanged for JSON');
+});

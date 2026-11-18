@@ -42,8 +42,11 @@
   }
 
   const STRING_RE = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/g;
-  /** Index of the bracket matching the one at `pos` (skipping brackets inside strings), or -1. */
-  function matchBracket(text, pos) {
+  /**
+   * Index of the bracket matching the one at `pos`, or -1. Brackets inside "..." / '...' strings are skipped unless
+   * opts.strings === false (prose, where an apostrophe is not a quote).
+   */
+  function matchBracket(text, pos, opts) {
     const ch = text[pos];
     let dir, open, close;
     if (OPEN.includes(ch)) { dir = 1; open = ch; close = CLOSE[OPEN.indexOf(ch)]; }
@@ -52,7 +55,7 @@
     const strings = [];
     let m;
     STRING_RE.lastIndex = 0;
-    while ((m = STRING_RE.exec(text))) strings.push([m.index, m.index + m[0].length]);
+    if (!opts || opts.strings !== false) while ((m = STRING_RE.exec(text))) strings.push([m.index, m.index + m[0].length]);
     const inString = (i) => { let lo = 0, hi = strings.length - 1; while (lo <= hi) { const mid = (lo + hi) >> 1; if (i < strings[mid][0]) hi = mid - 1; else if (i >= strings[mid][1]) lo = mid + 1; else return true; } return false; };
     if (inString(pos)) return -1;
     let depth = 0;
@@ -67,10 +70,10 @@
   }
 
   /** The bracket pair to highlight for a caret position: checks the char before the caret, then the one after. */
-  function bracketPair(text, caret) {
+  function bracketPair(text, caret, opts) {
     for (const p of [caret - 1, caret]) {
       if (p < 0 || p >= text.length) continue;
-      const q = matchBracket(text, p);
+      const q = matchBracket(text, p, opts);
       if (q !== -1) return [Math.min(p, q), Math.max(p, q)];
     }
     return null;
