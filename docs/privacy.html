@@ -31,6 +31,9 @@
   <li>When the toolbar click passes page text to the new tab, it is held briefly in the browser's in-memory extension session storage and removed as soon as the new tab has read it. It is cleared when the browser exits at the latest.</li>
   <li>Interface preferences such as theme, output format and compare options, in local storage.</li>
   <li>A short list of recently opened or saved files (the browser's file handles, not their contents), in this browser's IndexedDB so you can reopen them. You can clear it from the Recent menu.</li>
+  <li>The link between each open document and the file it came from (the browser's file handle, not the contents), in this browser's IndexedDB, so Save still writes to that file after a reload. Links unused for 30 days are removed.</li>
+  <li>Only if you switch on "Keep my documents between visits" (extension only, off by default): the text of your open documents, in local storage, until you switch it off, which erases it.</li>
+  <li>The web version at github.io runs entirely in your browser tab with no network requests. Because every project hosted under a github.io account shares one browser storage area, the web version never stores document text in local storage.</li>
 </ul>
 <p>Nothing is uploaded. Remove stored data by closing the tab, clearing the extension's site data, or removing the extension.</p>
 

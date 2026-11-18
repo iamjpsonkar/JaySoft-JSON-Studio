@@ -48,9 +48,9 @@ To open local files by URL, enable "Allow access to file URLs" for JSON Studio o
 
 ## Privacy policy
 
-Use this URL once GitHub Pages is enabled (source: `docs/privacy.html`, Pages from branch `main`, folder `/docs`):
+Use this URL once GitHub Pages is enabled (source: `docs/privacy.html`, Pages from branch `main`, folder `/ (root)`):
 
-https://iamjpsonkar.github.io/JaySoft-JSON-Studio/privacy.html
+https://iamjpsonkar.github.io/JaySoft-JSON-Studio/docs/privacy.html
 
 The policy lists the GitHub issues page as contact, so no personal email is published. The dashboard asks for a separate contact email, which is not shown in the policy.
 

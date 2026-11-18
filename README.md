@@ -2,6 +2,10 @@
 
 A Chrome extension to view, format, query and compare JSON, **Python dicts** and other dict-like data. Paste almost anything and it works out what it is.
 
+## Use it in the browser
+
+The same studio runs as a web app: **https://iamjpsonkar.github.io/JaySoft-JSON-Studio/**. It is the extension's own code (the root `index.html`, generated from `studio.html` by `npm run build:pages`, loads the same `studio.js`, `core/` and `worker.js`), runs entirely in your browser tab and makes no network requests. Chromium browsers can open and save files in place; Firefox and Safari open files through a file picker and **Save downloads a copy**. The extension adds what a web page cannot do: opening the JSON of the page you are on, `file://` URLs, and (opt-in) keeping your documents between visits. For safety the web version does not offer that last one: every project on a `github.io` account shares one browser storage area.
+
 ## Install (unpacked)
 
 1. Clone or download this repository.
@@ -54,14 +58,19 @@ Every pane can take JSON on its own (paste, **Open**, drag and drop onto it, or 
 
 Saving, per pane: **Save** and **Save as** write the pane's raw text with the File System Access API (a warning appears if the file changed on disk after you opened it, and invalid text can be saved too). In Preview, **Save formatted…** writes the formatted output and **Download** saves it as a file. `Ctrl/Cmd+S` saves the pane you are working in. Copy buttons are in every view.
 
-Every pane opens in Raw so you can paste JSON straight in; loading content never switches the view. Your per-pane view choice is remembered.
+Every pane opens in Raw so you can paste JSON straight in; loading content never switches the view. Your per-pane view choice is remembered. **Split** shows Raw and Tree side by side (the tree follows what you type and keeps its open branches; scrolling is proportional). `Ctrl/Cmd+E` cycles Raw, Preview, Tree and Split.
+
+The **Outline** button in the Tree toolbar lists the top-level structure (and one level below); click an entry to jump to it in the tree.
+
+The **status bar** shows line and column (and how much is selected), the path of the selected tree row (click to copy it), the document's format, size, node count and depth, and its line ending. **Line endings are preserved**: a CRLF file is saved with CRLF (click `LF` / `CRLF` in the status bar to switch a document). Files that mix both are announced when opened. **Open** accepts several files at once (one tab each); binary files and files over 50 MB are refused with the reason.
 
 ## Working with several documents
 
 - **Resize**: drag the divider between the panes (and the one between the panes and the Compare / Validate area). Arrow keys move it when it has focus, double-click resets it. Sizes are remembered.
 - **Maximise**: the ⤢ button gives one pane the whole window; the same button or `Esc` restores it. **Sync scroll** (top bar) scrolls both panes together.
 - **Tabs**: each pane holds several documents. **Open**, a drop or a toolbar hand-off adds a tab when the pane already has content, so nothing is replaced. **+** starts an empty one. Tabs, with their text, survive a reload of the studio tab (session storage); file handles do not. Every tab remembers its own view, so tab 1 can be in Preview and tab 2 in Raw; switching tabs switches the view with it. New tabs are numbered (`Untitled`, `Untitled 2`, …); **double-click a tab** (or use the palette) to give it a name. Renaming a tab that is linked to a file detaches it from that file after a confirmation, so Save will ask where to save instead of overwriting the original.
-- **Recent**: the files you opened or saved, reopened in a new tab (browser permission is asked again when needed). File handles are kept in this browser's IndexedDB; **Clear recent files** empties the list.
+- **Recent**: the files you opened or saved, reopened in a new tab (browser permission is asked again when needed). File handles are kept in this browser's IndexedDB; **Clear recent files** empties the list. The same store keeps the link between each open document and its file, so after reloading the studio tab **Save still writes to the original file** (the browser may ask for permission again); unused links are dropped after 30 days. Each tab also brings back its own caret and scroll position.
+- **Keep my documents between visits** (Recent menu or palette; off by default, extension only): also stores the text of your open documents in this browser's local storage, so they are back when you reopen the studio after closing it. Switching it off erases the stored copy.
 - **Undo / redo** (Tree toolbar, or `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` in the tree) covers tree edits, Apply format, Repair and Clear, per document. Typing in Raw / Preview keeps the browser's own undo.
 - **Command palette**: `Ctrl/Cmd+K` (or the ⌘K button) lists every action: views, file actions, modes, layout, formats. Type to filter, arrows and Enter to run.
 
@@ -106,7 +115,7 @@ Compare uses the same two panes, each accepting any supported format, so you can
 
 ## Privacy
 
-Everything runs locally. See the [privacy policy](https://iamjpsonkar.github.io/JaySoft-JSON-Studio/privacy.html). In short: no servers, no analytics, no network requests. The toolbar click reads the active tab's text only at that moment.
+Everything runs locally. See the [privacy policy](https://iamjpsonkar.github.io/JaySoft-JSON-Studio/docs/privacy.html). In short: no servers, no analytics, no network requests. The toolbar click reads the active tab's text only at that moment.
 
 Debug logging: in the studio tab's console run `localStorage['jsstudio.logLevel']='debug'`. Logs contain sizes and flags, never your data.
 
@@ -136,3 +145,7 @@ git push origin v1.0.0
 ```
 
 Unzip the release and use **Load unpacked**, or upload the zip to the Chrome Web Store (see `store-listing.md`).
+
+Optional signed CRX: add a repository secret named `CRX_PRIVATE_KEY` (the contents of a PEM key made with `openssl genrsa -out key.pem 2048`) and the release also contains `json-studio-vX.Y.Z.crx`. Keep the key somewhere safe and never commit it: the extension ID is derived from it. Chrome on Windows and macOS generally refuses a `.crx` from outside the Web Store unless policy allows it, so the zip is the practical option for most people.
+
+The web app is not part of the release: GitHub Pages publishes the `main` branch (folder `/ (root)`), so the app is `index.html` at the root and the landing and privacy pages are under `/docs/`. After changing `studio.html`, run `npm run build:pages` and commit `index.html` (a test fails if it is stale).

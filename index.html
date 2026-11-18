@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'self'; connect-src 'none'">
+  <meta name="description" content="View, format, query, compare and validate JSON, Python dicts and other dict-like data. Runs entirely in your browser.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JSON Studio</title>
+  <link rel="icon" href="icons/icon32.png">
+  <link rel="stylesheet" href="studio.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="icons/icon32.png" alt="" width="22" height="22"><span>JSON Studio</span></div>
+    <div class="segmented" id="modeSwitch" role="group" aria-label="Mode">
+      <button data-mode="viewer" title="Work with one or two documents">Viewer</button>
+      <button data-mode="compare" title="Compare A and B">Compare</button>
+      <button data-mode="validate" title="Validate A against the JSON Schema in B">Validate</button>
+    </div>
+    <div class="segmented" id="layoutSwitch" role="group" aria-label="Panes">
+      <button data-layout="1" title="One pane">1 pane</button>
+      <button data-layout="2" title="Two panes side by side">2 panes</button>
+    </div>
+    <button class="btn" id="btnSync" aria-pressed="false" title="Scroll both panes together">Sync scroll: off</button>
+    <div class="spacer"></div>
+    <span class="status" id="status" role="status" aria-live="polite"></span>
+    <a class="btn" id="linkExt" href="https://github.com/iamjpsonkar/JaySoft-JSON-Studio#install" target="_blank" rel="noopener" hidden title="This page is the web version. The Chrome extension also opens JSON from the pages you browse.">Get the extension</a>
+    <button class="btn" id="btnPalette" title="Command palette (Ctrl/Cmd+K)">⌘K</button>
+    <button class="btn" id="btnTheme" title="Theme: auto / light / dark">Auto</button>
+  </header>
+
+  <main id="stage" data-mode="viewer">
+    <!-- the two document panes are created from #paneTpl -->
+    <div id="paneRow" data-layout="2"></div>
+
+    <div class="hsplit" id="stageSplit" role="separator" aria-orientation="horizontal" tabindex="0" title="Drag to resize; double-click to reset" hidden></div>
+
+    <section id="valPanel" hidden>
+      <div class="cmp-options">
+        <span class="meta"><strong>A</strong> = the document, <strong>B</strong> = a JSON Schema</span>
+        <div class="spacer"></div>
+        <button class="tb" id="vInfer" title="Write a schema inferred from A into B">Infer schema from A → B</button>
+        <button class="tb" id="vSwap" title="Swap A and B">⇄ Swap</button>
+        <button class="tb" id="vToggleInputs" title="Show or hide the two panes">Hide panes</button>
+      </div>
+      <div class="toolbar2"><span class="chips" id="vStats"></span></div>
+      <div class="cmp-body" id="vBody"></div>
+    </section>
+
+    <section id="cmpPanel" hidden>
+      <div class="cmp-options" id="cOptions">
+        <label class="check"><input type="checkbox" id="oOrder" checked> ignore key order</label>
+        <label>Arrays
+          <select id="oArray" class="field">
+            <option value="index">by index</option><option value="key">match by key</option><option value="set">unordered (set)</option>
+          </select>
+        </label>
+        <input type="text" id="oArrayKey" class="field" value="id" size="6" title="Key used to match array items" aria-label="Array match key" hidden>
+        <input type="text" id="oIgnore" class="field mono" size="26" placeholder="ignore: updated_at, items[*].ts, /regex/" title="Comma separated: bare name (any depth), $.a.b[0], a.*.id, **.name or /regex/" aria-label="Ignore paths">
+        <label>± <input type="number" id="oTol" class="field" value="0" min="0" step="any" style="width:5.5em" title="Numbers within this distance count as equal"></label>
+        <label class="check"><input type="checkbox" id="oCase"> case-insensitive</label>
+        <label class="check"><input type="checkbox" id="oTrim"> trim strings</label>
+        <label class="check" title="A missing key equals a null value"><input type="checkbox" id="oMissing"> missing = null</label>
+        <div class="spacer"></div>
+        <button class="tb" id="cSwap" title="Swap A and B">⇄ Swap</button>
+        <button class="tb" id="cToggleInputs" title="Show or hide the two panes">Hide panes</button>
+      </div>
+      <div class="cmp-result">
+        <div class="toolbar2" id="cBar">
+          <div class="segmented small" id="cTabs" role="group" aria-label="Compare view">
+            <button data-ctab="tree">Tree diff</button><button data-ctab="text">Text diff</button>
+          </div>
+          <span class="chips" id="cStats"></span>
+          <div class="spacer"></div>
+          <label class="check" title="Collapse unchanged branches"><input type="checkbox" id="cCollapse" checked> hide unchanged</label>
+          <button class="tb" id="cPrev" title="Previous difference">↑</button>
+          <button class="tb" id="cNext" title="Next difference">↓</button>
+          <span class="meta" id="cPos"></span>
+          <button class="tb" id="cCopyPaths" title="Copy the list of differing paths">Copy paths</button>
+          <button class="tb" id="cCopyPatch" title="Copy as RFC 6902 JSON Patch (array mode: by index)">Copy JSON Patch</button>
+        </div>
+        <div class="cmp-body" id="cBody"></div>
+      </div>
+    </section>
+  </main>
+
+  <template id="paneTpl">
+    <section class="docpane">
+      <div class="pane-head">
+        <strong data-label></strong>
+        <span class="file-name" data-name>Untitled</span>
+        <div class="segmented small" data-views role="group" aria-label="View">
+          <button data-view="raw" title="Raw text, as loaded (editable)">Raw</button>
+          <button data-view="preview" title="Formatted and coloured (editable)">Preview</button>
+          <button data-view="tree" title="Collapsible tree (double-click to edit)">Tree</button>
+          <button data-view="split" title="Raw text and tree side by side">Split</button>
+        </div>
+        <div class="spacer"></div>
+        <button class="tb" data-act="max" title="Maximise this pane (Esc to restore)" aria-pressed="false">⤢</button>
+        <button class="tb" data-act="open" title="Open a file">Open</button>
+        <button class="tb" data-act="recent" title="Recently opened files">Recent ▾</button>
+        <button class="tb" data-act="paste" title="Paste from clipboard">Paste</button>
+        <button class="tb" data-act="clear" title="Clear this pane">Clear</button>
+        <button class="tb" data-act="save" title="Save the document (Ctrl/Cmd+S)">Save</button>
+        <button class="tb" data-act="saveas" title="Save the document as…">Save as</button>
+      </div>
+      <div class="tabstrip" data-tabs role="tablist" aria-label="Documents in this pane"></div>
+      <div class="info-box" data-info></div>
+      <div class="pane-body">
+        <div class="view" data-view-raw>
+          <div class="toolbar2">
+            <button class="tb" data-act="apply" title="Replace the raw text with the formatted output">Apply format</button>
+            <button class="tb" data-act="transform" title="Sort, minify, clean up, convert…">Transform ▾</button>
+            <button class="tb" data-act="copy-raw" title="Copy the raw text">Copy</button>
+            <button class="tb" data-act="wrap" aria-pressed="true" title="Word wrap (applies to Raw and Preview)">Wrap</button>
+            <button class="tb" data-act="find-raw" title="Find and replace (Ctrl/Cmd+F)">Find</button>
+            <div class="spacer"></div>
+            <span class="meta" data-meta-raw></span>
+          </div>
+          <div class="editor" data-editor="raw">
+            <pre class="ed-gutter" aria-hidden="true"></pre>
+            <div class="ed-main">
+              <pre class="ed-find" aria-hidden="true"></pre><pre class="ed-brk" aria-hidden="true"></pre>
+              <pre class="ed-hl" aria-hidden="true"></pre>
+              <textarea data-input wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off"
+                placeholder="Paste JSON, a Python dict, a JS object, stringified JSON, a log line, Base64, a JWT…&#10;or drop a file here."></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="view" data-view-preview hidden>
+          <div class="toolbar2">
+            <label>Format <select class="field" data-f-style>
+              <option value="auto">Same as input</option><option value="json">JSON</option>
+              <option value="python">Python</option><option value="js">JavaScript / JSON5</option>
+            </select></label>
+            <label>Indent <select class="field" data-f-indent>
+              <option value="2">2 spaces</option><option value="4">4 spaces</option>
+              <option value="tab">Tab</option><option value="0">Minified</option>
+            </select></label>
+            <label class="check"><input type="checkbox" data-f-sort> sort keys</label>
+            <div class="spacer"></div>
+            <span class="meta" data-f-note></span>
+            <button class="tb" data-act="transform" title="Sort, minify, clean up, convert… (changes the document)">Transform ▾</button>
+            <button class="tb" data-act="wrap" aria-pressed="true" title="Word wrap (applies to Raw and Preview)">Wrap</button>
+            <button class="tb" data-act="find-preview" title="Find and replace (Ctrl/Cmd+F)">Find</button>
+            <button class="tb" data-act="copy-fmt">Copy</button>
+            <button class="tb" data-act="download">Download</button>
+            <button class="tb" data-act="save-fmt" title="Save the formatted text to a file">Save formatted…</button>
+          </div>
+          <div class="editor" data-editor="preview">
+            <pre class="ed-gutter" aria-hidden="true"></pre>
+            <div class="ed-main">
+              <pre class="ed-find" aria-hidden="true"></pre><pre class="ed-brk" aria-hidden="true"></pre>
+              <pre class="ed-hl" data-preview aria-hidden="true"></pre>
+              <textarea data-pinput wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Formatted preview (editable)"
+                placeholder="Paste JSON here, or use Open / Paste above.&#10;Edits here update the document."></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="view" data-view-tree hidden>
+          <div class="toolbar2" data-tree-bar>
+            <input type="search" class="field" data-search placeholder="Search keys and values" aria-label="Search" size="18">
+            <span class="meta" data-search-count></span>
+            <button class="tb" data-act="prev" title="Previous match">↑</button>
+            <button class="tb" data-act="next" title="Next match (Enter)">↓</button>
+            <label class="check" title="Show only matching branches"><input type="checkbox" data-filter> filter</label>
+            <span class="sep"></span>
+            <input type="text" class="field mono" data-query placeholder="JSONPath, e.g. $..items[?(@.price&lt;10)].name" aria-label="JSONPath query" spellcheck="false">
+            <span class="sep"></span>
+            <button class="tb" data-act="transform" title="Sort, minify, clean up, convert…">Transform ▾</button>
+            <button class="tb" data-act="undo" title="Undo the last tree edit (Ctrl/Cmd+Z)">↶ Undo</button>
+            <button class="tb" data-act="redo" title="Redo (Ctrl/Cmd+Shift+Z)">↷ Redo</button>
+            <span class="sep"></span>
+            <button class="tb" data-act="outline" aria-pressed="false" title="Show the outline: the top-level structure, click to jump">Outline</button>
+            <button class="tb" data-act="expand-all" title="Expand all (limited by the render budget)">Expand</button>
+            <button class="tb" data-act="collapse-all" title="Collapse all">Collapse</button>
+            <select class="field" data-depth title="Expand to depth" aria-label="Expand to depth">
+              <option value="1">depth 1</option><option value="2" selected>depth 2</option><option value="3">depth 3</option>
+              <option value="4">depth 4</option><option value="99">all</option>
+            </select>
+            <button class="tb accent" data-act="embedded" hidden title="Parse JSON stored inside string values">Expand embedded JSON</button>
+            <span class="meta" data-meta-tree></span>
+          </div>
+          <div class="tree-wrap">
+            <aside class="outline" data-outline hidden aria-label="Outline"></aside>
+            <div class="tree-main">
+              <div class="tree" data-tree tabindex="0" aria-label="Tree view"></div>
+              <div class="query-results" data-query-box hidden></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <footer class="statusbar">
+    <span id="stLeft">Ready</span>
+    <div class="spacer"></div>
+    <button class="st-path" id="stPath" title="Path of the selected tree row (click to copy)" hidden></button>
+    <span id="stPos"></span>
+    <span id="stDoc"></span>
+    <button class="tb st-btn" id="stEol" title="Line ending of this document: click to switch (used when saving)">LF</button>
+  </footer>
+
+  <input type="file" id="fileInput" multiple hidden tabindex="-1" aria-hidden="true"
+    accept=".json,.jsonc,.json5,.ndjson,.jsonl,.geojson,.txt,.log,.py,.rb,.php,.js,application/json,text/plain">
+  <div class="palette-overlay" id="palette" hidden>
+    <div class="palette" role="dialog" aria-label="Command palette">
+      <input type="text" id="palInput" class="field" placeholder="Type a command…" autocomplete="off" spellcheck="false" aria-label="Command" aria-controls="palList">
+      <ul id="palList" role="listbox"></ul>
+    </div>
+  </div>
+  <div class="drop-overlay" id="dropOverlay" hidden><div>Drop files to open</div></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="core/ast.js"></script>
+  <script src="core/parser.js"></script>
+  <script src="core/fmt.js"></script>
+  <script src="core/loader.js"></script>
+  <script src="core/diff.js"></script>
+  <script src="core/query.js"></script>
+  <script src="core/textdiff.js"></script>
+  <script src="core/find.js"></script>
+  <script src="core/editing.js"></script>
+  <script src="core/convert.js"></script>
+  <script src="core/schema.js"></script>
+  <script src="core/transform.js"></script>
+  <script src="studio.js"></script>
+</body>
+</html>
