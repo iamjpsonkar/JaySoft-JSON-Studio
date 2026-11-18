@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JSON Studio",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "View, format, query and compare JSON, Python dicts and other dict-like data. Paste anything: stringified JSON, logs, Base64, JWT.",
   "icons": {
     "16": "icons/icon16.png",

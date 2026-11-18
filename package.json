@@ -1,6 +1,6 @@
 {
   "name": "json-studio",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "JSON Studio Chrome extension: view, format, query and compare JSON, Python dicts and other dict-like data.",
   "scripts": {
