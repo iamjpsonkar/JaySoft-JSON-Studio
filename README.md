@@ -48,13 +48,38 @@ The studio has two identical, independent panes (**A** and **B**). Use **1 pane 
 
 Every pane can take JSON on its own (paste, **Open**, drag and drop onto it, or the toolbar click for pane A) and has its own view switch:
 
-- **Raw**: the exact text, editable, with live parsing, the "what did the loader do" steps, and **Apply format** to replace the text with the formatted output.
-- **Preview**: read-only, syntax-coloured formatted output as JSON, Python or JavaScript, with indent (2, 4, tab or minified) and sorted keys.
-- **Tree**: collapsible tree with type colours and counts, search over keys and values (next/previous and a "filter" mode), expand/collapse and depth control, **JSONPath** queries, copy of a node's path / value / subtree, and **double-click** to edit a value. Large arrays are paged and the page stays responsive.
+- **Raw**: the exact text, editable, with line numbers, syntax colours, live parsing, the "what did the loader do" steps, and **Apply format** to replace the text with the formatted output.
+- **Preview**: syntax-coloured formatted output as JSON, Python or JavaScript, with line numbers, indent (2, 4, tab or minified) and sorted keys. It is **editable**: what you type becomes the pane's text (it is not re-formatted while you type; switching views or changing the format options formats it again). An unparsable document is shown as typed so you can fix it in place.
+- **Tree**: collapsible tree with type colours and counts, search over keys and values (next/previous and a "filter" mode), expand/collapse and depth control, **JSONPath** queries, copy of a node's path / value / subtree, row numbers, and editing: **double-click** a value or a key to change it, **+ add** on an object or array, **delete** on any entry (hover a row). Edits rewrite the pane's text in its own format (a Python dict stays a Python dict). Large arrays are paged and the page stays responsive.
 
 Saving, per pane: **Save** and **Save as** write the pane's raw text with the File System Access API (a warning appears if the file changed on disk after you opened it, and invalid text can be saved too). In Preview, **Save formatted…** writes the formatted output and **Download** saves it as a file. `Ctrl/Cmd+S` saves the pane you are working in. Copy buttons are in every view.
 
-An empty pane starts in Raw so there is somewhere to paste. Loading content with Open, Paste or a drop switches it to Tree, unless you have chosen a view for that pane yourself.
+Every pane opens in Raw so you can paste JSON straight in; loading content never switches the view. Your per-pane view choice is remembered.
+
+## Working with several documents
+
+- **Resize**: drag the divider between the panes (and the one between the panes and the Compare / Validate area). Arrow keys move it when it has focus, double-click resets it. Sizes are remembered.
+- **Maximise**: the ⤢ button gives one pane the whole window; the same button or `Esc` restores it. **Sync scroll** (top bar) scrolls both panes together.
+- **Tabs**: each pane holds several documents. **Open**, a drop or a toolbar hand-off adds a tab when the pane already has content, so nothing is replaced. **+** starts an empty one. Tabs, with their text, survive a reload of the studio tab (session storage); file handles do not.
+- **Recent**: the files you opened or saved, reopened in a new tab (browser permission is asked again when needed). File handles are kept in this browser's IndexedDB; **Clear recent files** empties the list.
+- **Undo / redo** (Tree toolbar, or `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` in the tree) covers tree edits, Apply format, Repair and Clear, per document. Typing in Raw / Preview keeps the browser's own undo.
+- **Command palette**: `Ctrl/Cmd+K` (or the ⌘K button) lists every action: views, file actions, modes, layout, formats. Type to filter, arrows and Enter to run.
+
+### Editors (Raw and Preview)
+
+Line numbers and colours; **Find / replace** (`Ctrl/Cmd+F` or **Find**) with match case, regular expressions (`$1` in replacements), match highlighting, next / previous, replace one / all; bracket-pair highlighting; Enter keeps the indentation and adds a level after `{`, `[`, `(`; Tab / Shift+Tab indent and outdent (press `Esc` first to Tab out of the editor). Above 200,000 characters the editors drop colours and highlighting and stay plain. There is no code folding in the editors (use the Tree to fold).
+
+### Tree keyboard
+
+Click a row (or focus the tree), then: `↑ ↓ Home End` move, `→` opens or enters, `←` closes or goes to the parent, `Enter` edits a value or folds, `F2` renames a key, `Delete` removes the entry.
+
+### Export formats (Preview)
+
+The Preview **Format** list also offers read-only exports of the current document: **YAML**, **CSV** (one row per array item, nested keys flattened to `a.b` / `a[0]`), **TypeScript types** and **JSON Schema** (draft 2020-12). Types and schema are inferred from the sample: arrays of objects merge into one shape and keys missing from some items become optional. Exports never change the document; **Copy**, **Download** and **Save formatted…** use them.
+
+## Validate
+
+**Validate** mode checks pane **A** against the JSON Schema in pane **B**. Errors list the path, the failing keyword and a message; click one to jump to it in A's tree. **Infer schema from A → B** writes a starting schema. Supported keywords: `type, enum, const, properties, required, additionalProperties, patternProperties, propertyNames, items, prefixItems, contains, min/maxItems, uniqueItems, min/maxLength, pattern, minimum/maximum, exclusiveMinimum/Maximum, multipleOf, min/maxProperties, allOf, anyOf, oneOf, not, if/then/else`, local `$ref`, and the formats `email, uuid, date, date-time, ipv4`. Anything else in the schema is listed as "not checked", never silently treated as passed. Remote `$ref`s are not fetched (no network access). Numbers inside the schema go through `JSON.parse`, so constants beyond 2^53 lose precision there.
 
 ## Compare
 

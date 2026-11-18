@@ -24,7 +24,7 @@ async function boot({ search = '', session = {}, prefs } = {}) {
   w.chrome = { storage: { session: { get: async (k) => ({ [k]: session[k] }), remove: async (k) => { delete session[k]; } } } };
   w.confirm = () => true;
   if (prefs) w.localStorage.setItem('jsstudio.prefs.v1', JSON.stringify(prefs));
-  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
+  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
   w.JSS.setLogLevel('error');
   w.eval(fs.readFileSync(path.join(ROOT, 'studio.js'), 'utf8'));
   await sleep(60);
@@ -75,7 +75,7 @@ test('both panes are identical: each has Raw / Preview / Tree and Open, Paste, C
     assert.deepEqual(p.qa('[data-views] button').map((b) => b.textContent), ['Raw', 'Preview', 'Tree']);
     for (const act of ['open', 'paste', 'clear', 'save', 'saveas']) assert.ok(p.q(`[data-act="${act}"]`), `${p.root.dataset.pane}: ${act}`);
     assert.ok(p.input, 'has its own raw input');
-    assert.deepEqual(p.visibleView(), ['raw'], 'an empty pane starts in Raw so there is somewhere to paste');
+    assert.deepEqual(p.visibleView(), ['raw'], 'a pane opens in Raw so JSON can be pasted straight in');
   }
   assert.equal(t.a.q('[data-label]').textContent, 'A');
   assert.equal(t.b.q('[data-label]').textContent, 'B');
@@ -138,25 +138,26 @@ test('preview: formatted, syntax-coloured, never markup; options apply', async (
   assert.equal(t.w.__copied.slice(-1)[0], pre.textContent);
 });
 
-test('loading content into an empty pane (open / paste) shows a tree, unless a view was picked', async () => {
+test('loading content into a pane (open / paste) keeps Raw, the default view', async () => {
   const t = await boot();
   const log = [];
   t.w.showOpenFilePicker = async () => [fakeHandle('a.json', '{"x": 1}', log)];
   t.a.act('open');
   await sleep(400);
-  assert.deepEqual(t.a.visibleView(), ['tree']);
+  assert.deepEqual(t.a.visibleView(), ['raw']);
+  assert.equal(t.a.input.value, '{"x": 1}');
   assert.equal(t.a.q('[data-name]').textContent, 'a.json');
-  t.b.view('raw'); // a deliberate choice
+  t.b.view('tree'); // a deliberate choice
   t.w.__clip = '{"y": 2}';
   t.b.act('paste');
   await sleep(450);
   assert.equal(t.b.input.value, '{"y": 2}');
-  assert.deepEqual(t.b.visibleView(), ['raw'], 'a deliberate choice is not overridden');
+  assert.deepEqual(t.b.visibleView(), ['tree'], 'a deliberate choice is not overridden');
   const t2 = await boot();
   t2.w.__clip = '{"z": 3}';
   t2.b.act('paste');
   await sleep(450);
-  assert.deepEqual(t2.b.visibleView(), ['tree']);
+  assert.deepEqual(t2.b.visibleView(), ['raw']);
 });
 
 test('saving: each pane saves its own raw text, to its own file', async () => {
@@ -357,7 +358,7 @@ test('raw: errors show line/column, repair is announced and can be undone; expan
   t.a.view('tree');
   assert.ok(t.a.q('[data-tree] .empty'));
   t.a.view('preview');
-  assert.match(t.a.q('[data-preview]').textContent, /Fix the error/);
+  assert.match(t.a.q('[data-pinput]').value, /"tex$/, 'an unparsable document is shown as typed, so it can be fixed in the preview');
 
   await t.b.type(JSON.stringify({ id: 1, body: '{"a":[1,2]}' }));
   t.b.view('tree');
@@ -458,6 +459,8 @@ test('hand-off from the toolbar click (?h=) loads pane A; the key is consumed', 
   const session = { 'js:pending:abc123': { text: '{"from":"page","n":[1,2]}', name: 'api response', source: 'page' } };
   const t = await boot({ search: '?h=abc123', session });
   await sleep(150);
+  assert.match(t.a.input.value, /"from":"page"/);
+  t.a.view('tree');
   assert.ok(t.a.rowTexts().includes('"from": "page"'), t.a.rowTexts().join(' | '));
   assert.equal(t.a.q('[data-name]').textContent.trim(), 'api response');
   assert.equal(t.b.input.value, '', 'pane B stays empty');
@@ -506,7 +509,7 @@ test('each tab keeps its own session (sessionStorage); preferences are shared', 
   const t2 = await boot({ prefs: JSON.parse(prefsRaw) });
   assert.equal(t2.a.input.value, '');
   assert.equal(t2.b.input.value, '');
-  assert.deepEqual(t2.a.visibleView(), ['raw'], 'an empty pane starts in Raw even if Tree was saved');
+  assert.deepEqual(t2.a.visibleView(), ['raw'], 'the saved per-pane view is kept');
 });
 
 test('theme and mode switching', async () => {
@@ -537,5 +540,568 @@ test('large document: parsed and rendered within the row budget', async () => {
   assert.ok(t.a.rows().length <= 4001);
   assert.ok(t.a.q('[data-tree] .notice, [data-tree] .more-row'), 'the user is told rows were limited');
   t.a.view('preview');
-  assert.ok(t.a.q('[data-preview]').textContent.length > 100000, 'preview renders (plain text beyond the highlight limit)');
+  assert.ok(t.a.q('[data-pinput]').value.length > 100000, 'preview renders (plain text beyond the highlight limit)');
+  assert.ok(t.a.q('[data-editor="preview"]').classList.contains('plain'), 'colour layer is dropped for very large text');
+});
+
+test('default view is Raw (both panes); the Preview editor of an empty pane accepts typing too', async () => {
+  const t = await boot();
+  assert.equal(t.a.activeBtn(), 'raw');
+  assert.equal(t.b.activeBtn(), 'raw');
+  t.a.view('preview');
+  const ta = t.a.q('[data-pinput]');
+  ta.value = '{"typed":"in preview"}';
+  ta.dispatchEvent(new t.w.Event('input', { bubbles: true }));
+  await sleep(380);
+  assert.equal(t.a.input.value, '{"typed":"in preview"}', 'typing in the empty preview fills the document');
+});
+
+test('line numbers in Raw and Preview, and colours in Raw', async () => {
+  const t = await boot();
+  await t.a.type('{\n  "a": 1,\n  "b": "x",\n  "c": [true, null]\n}');
+  t.a.view('raw');
+  const gutter = t.a.q('[data-editor="raw"] .ed-gutter');
+  assert.equal(gutter.textContent, '1\n2\n3\n4\n5');
+  const hl = t.a.q('[data-editor="raw"] .ed-hl');
+  assert.ok(hl.querySelector('.p-key') && hl.querySelector('.p-str') && hl.querySelector('.p-num') && hl.querySelector('.p-kw'), 'raw is coloured');
+  assert.equal(hl.textContent, t.a.input.value, 'the colour layer mirrors the text exactly');
+  await t.a.type('[1]');
+  assert.equal(gutter.textContent, '1', 'numbers follow the text');
+  t.a.view('preview');
+  assert.equal(t.a.q('[data-editor="preview"] .ed-gutter').textContent, '1\n2\n3', 'preview has its own numbers (formatted output)');
+});
+
+test('line numbers in the tree: every row is numbered by a gutter rule, rows are indented past it', async () => {
+  const css = fs.readFileSync(path.join(ROOT, 'studio.css'), 'utf8');
+  assert.match(css, /\.row::before\s*\{[^}]*counter-increment: ln/);
+  assert.match(css, /\.tree\s*\{[^}]*counter-reset: ln/);
+  const t = await boot();
+  await t.a.type('{"a": {"b": 1}}');
+  t.a.view('tree');
+  assert.match(t.a.rows()[0].style.paddingLeft, /^52px$/);
+  assert.match(t.a.rows()[1].style.paddingLeft, /^68px$/);
+});
+
+test('preview is editable: edits become the raw text, are not re-formatted under the caret, and re-parse', async () => {
+  const t = await boot();
+  await t.a.type('{"a":1}');
+  t.a.view('preview');
+  const ta = t.a.q('[data-pinput]');
+  assert.equal(ta.value, '{\n  "a": 1\n}');
+  ta.value = '{\n  "a": 2, "z": [1,2]\n}';
+  ta.dispatchEvent(new t.w.Event('input', { bubbles: true }));
+  await sleep(400);
+  assert.equal(t.a.input.value, '{\n  "a": 2, "z": [1,2]\n}', 'raw text = the edited preview text');
+  assert.equal(ta.value, '{\n  "a": 2, "z": [1,2]\n}', 'the editor text is left as typed');
+  assert.equal(t.a.q('[data-editor="preview"] .ed-gutter').textContent, '1\n2\n3');
+  t.a.view('tree');
+  assert.ok(t.a.rowTexts().includes('"a": 2'), t.a.rowTexts().join(' | '));
+  t.a.view('preview');
+  assert.equal(ta.value, '{\n  "a": 2,\n  "z": [\n    1,\n    2\n  ]\n}', 'entering the view formats again');
+  ta.value = '{"broken": ';
+  ta.dispatchEvent(new t.w.Event('input', { bubbles: true }));
+  await sleep(400);
+  assert.ok(t.a.q('[data-info] .err'), 'a half-typed document shows the error but keeps the text');
+  assert.equal(ta.value, '{"broken": ');
+  assert.equal(t.a.q('[data-editor="preview"] .ed-hl').textContent, '{"broken": ');
+  assert.deepEqual(t.errors, []);
+});
+
+test('tree editing: rename a key, add to an object and an array, delete; Python dicts stay Python', async () => {
+  const t = await boot();
+  await t.a.type('{"a": 1, "list": [1, 2]}');
+  t.a.view('tree');
+  const rowOf = (re) => t.a.rows().find((r) => re.test(rowTextOf(r)));
+  const rowTextOf = (r) => t.rowText(r);
+  const dbl = (el) => el.dispatchEvent(new t.w.MouseEvent('dblclick', { bubbles: true }));
+  const commit = async (text) => {
+    const input = t.a.q('[data-tree] input.edit');
+    input.value = text;
+    input.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await sleep(400);
+  };
+  // rename
+  dbl(rowOf(/^"a": 1/).querySelector('.k'));
+  await commit('renamed');
+  assert.match(t.a.input.value, /"renamed": 1/);
+  // duplicate key is refused
+  dbl(t.a.rows().find((r) => /"renamed"/.test(rowTextOf(r))).querySelector('.k'));
+  await commit('list');
+  assert.match(t.$('toast').textContent, /already exists/);
+  assert.match(t.a.input.value, /"renamed": 1/);
+  // add to the root object: new key opens for renaming
+  t.click(t.a.rows()[0].querySelector('[data-act="add"]'));
+  await sleep(400);
+  assert.match(t.a.input.value, /"newKey": null/);
+  assert.ok(t.a.q('[data-tree] input.edit'), 'the new key is open for typing');
+  await commit('added');
+  assert.match(t.a.input.value, /"added": null/);
+  // append to the array: the value opens for typing
+  t.click(rowOf(/^▾?▸?\s*"list"/).querySelector('[data-act="add"]'));
+  await sleep(400);
+  const listRow = () => rowOf(/"list"/);
+  assert.ok(t.a.q('[data-tree] input.edit'), 'the new item is open for typing');
+  await commit('42');
+  assert.match(t.a.input.value, /"list": \[\s*1,\s*2,\s*42\s*\]/);
+  assert.ok(listRow());
+  // delete
+  t.click(rowOf(/"added"/).querySelector('[data-act="delete"]'));
+  await sleep(400);
+  assert.ok(!/added/.test(t.a.input.value));
+  assert.equal(t.a.rows()[0].querySelector('[data-act="delete"]'), null, 'the root cannot be deleted');
+  // Python stays Python
+  await t.b.type("{'k': True}");
+  t.b.view('tree');
+  t.click(t.b.rows()[0].querySelector('[data-act="add"]'));
+  await sleep(400);
+  assert.match(t.b.input.value, /'newKey': None/);
+  assert.deepEqual(t.errors, []);
+});
+
+// ====================================================================== feature batch: resize, maximise, sync, tabs, recents, history, find, editing, export, validate, palette
+const key = (w, el, k, o) => el.dispatchEvent(new w.KeyboardEvent('keydown', Object.assign({ key: k, bubbles: true, cancelable: true }, o)));
+const ptr = (w, el, type, o) => el.dispatchEvent(new w.MouseEvent(type, Object.assign({ bubbles: true, cancelable: true, button: 0 }, o)));
+
+test('resize by dragging the divider; keyboard and double-click; clamped and remembered', async () => {
+  const t = await boot();
+  const split = t.$('paneSplit');
+  t.$('paneRow').getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 });
+  ptr(t.w, split, 'pointerdown');
+  ptr(t.w, split, 'pointermove', { clientX: 300 });
+  const flex = (p) => p.root.style.flex.replace(/ 0px$/, ' 0'); // jsdom writes 0 as 0px
+  assert.equal(flex(t.a), '0.3 1 0');
+  assert.equal(flex(t.b), '0.7 1 0');
+  ptr(t.w, split, 'pointermove', { clientX: 5 });
+  assert.equal(flex(t.a), '0.15 1 0', 'a pane cannot be dragged away');
+  ptr(t.w, split, 'pointerup');
+  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).split, 0.15, 'remembered');
+  key(t.w, split, 'ArrowRight');
+  assert.equal(Math.round(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).split * 100), 17);
+  split.dispatchEvent(new t.w.MouseEvent('dblclick', { bubbles: true }));
+  assert.equal(flex(t.a), '0.5 1 0');
+  // after a reload the saved size is applied
+  ptr(t.w, split, 'pointerdown'); ptr(t.w, split, 'pointermove', { clientX: 400 }); ptr(t.w, split, 'pointerup');
+  const t2 = await boot({ prefs: JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')) });
+  assert.equal(flex(t2.a), '0.4 1 0');
+  // the divider between the panes and the compare area exists only outside the viewer
+  assert.equal(t.$('stageSplit').hidden, true);
+  t.click(t.q('#modeSwitch [data-mode="compare"]'));
+  assert.equal(t.$('stageSplit').hidden, false);
+  t.$('stage').getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 1000 });
+  ptr(t.w, t.$('stageSplit'), 'pointerdown'); ptr(t.w, t.$('stageSplit'), 'pointermove', { clientY: 600 }); ptr(t.w, t.$('stageSplit'), 'pointerup');
+  assert.equal(t.$('paneRow').style.flex.replace(/ 0px /, ' 0 '), '0 0 60%');
+  t.click('cToggleInputs');
+  assert.equal(t.$('stageSplit').hidden, true, 'no divider while the panes are hidden');
+  assert.deepEqual(t.errors, []);
+});
+
+test('maximise a pane; Escape restores', async () => {
+  const t = await boot();
+  t.a.act('max');
+  assert.equal(t.$('paneRow').dataset.max, 'a');
+  assert.equal(t.a.q('[data-act="max"]').getAttribute('aria-pressed'), 'true');
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(t.$('paneRow').dataset.max, undefined);
+  t.b.act('max');
+  assert.equal(t.$('paneRow').dataset.max, 'b');
+  t.b.act('max');
+  assert.equal(t.$('paneRow').dataset.max, undefined, 'the same button toggles it back');
+});
+
+test('synced scrolling mirrors the other pane, only while switched on', async () => {
+  const t = await boot();
+  t.a.input.scrollTop = 120;
+  t.a.input.dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(t.b.input.scrollTop, 0, 'off by default');
+  t.click('btnSync');
+  assert.equal(t.$('btnSync').textContent, 'Sync scroll: on');
+  t.a.input.scrollTop = 150;
+  t.a.input.dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(t.b.input.scrollTop, 150);
+  t.b.input.dispatchEvent(new t.w.Event('scroll')); // the echo from the mirrored pane is ignored
+  assert.equal(t.a.input.scrollTop, 150);
+  t.b.input.scrollTop = 40;
+  t.b.input.dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(t.a.input.scrollTop, 40, 'works both ways');
+  t.click('btnSync');
+  t.a.input.scrollTop = 10;
+  t.a.input.dispatchEvent(new t.w.Event('scroll'));
+  assert.equal(t.b.input.scrollTop, 40, 'off again');
+});
+
+test('tabs: opening a file keeps the document already in the pane; switch, close, and survive a reload of the tab', async () => {
+  const t = await boot();
+  const log = [];
+  await t.a.type('{"one": 1}');
+  t.w.showOpenFilePicker = async () => [fakeHandle('two.json', '{"two": 2}', log)];
+  t.a.act('open');
+  await sleep(400);
+  assert.deepEqual(t.a.qa('[data-tabs] .tab').map((x) => x.textContent), ['Untitled×', 'two.json×']);
+  assert.equal(t.a.input.value, '{"two": 2}');
+  t.click(t.a.q('[data-tab="0"]'));
+  await sleep(380);
+  assert.equal(t.a.input.value, '{"one": 1}', 'the first document is intact');
+  assert.equal(t.a.q('[data-name]').textContent, 'Untitled');
+  t.a.view('tree');
+  assert.ok(t.a.rowTexts().includes('"one": 1'), 'the tree follows the tab');
+  await sleep(600);
+  const saved = JSON.parse(t.w.sessionStorage.getItem('jsstudio.session.v1'));
+  assert.deepEqual(saved.a.tabs.map((x) => x.text), ['{"one": 1}', '{"two": 2}']);
+  t.click(t.a.q('[data-close="0"]'));
+  await sleep(380);
+  assert.equal(t.a.qa('[data-tabs] .tab').length, 1);
+  assert.equal(t.a.input.value, '{"two": 2}');
+  assert.equal(t.a.q('[data-name]').textContent, 'two.json');
+  t.a.act('newtab');
+  await sleep(380);
+  assert.equal(t.a.qa('[data-tabs] .tab').length, 2);
+  assert.equal(t.a.input.value, '');
+  t.click(t.a.q('[data-close="1"]'));
+  await sleep(380);
+  assert.equal(t.a.input.value, '{"two": 2}');
+  assert.deepEqual(t.errors, []);
+});
+
+test('tabs are restored with the session', async () => {
+  const session = { a: { text: '{"second": 2}', name: 'second', tab: 1, tabs: [{ text: '{"first": 1}', name: 'first' }, { text: '{"second": 2}', name: 'second' }] }, b: { text: '', name: 'Untitled' } };
+  const t = await bootSeeded(session);
+  assert.deepEqual(t.a.qa('[data-tabs] .tab').map((x) => x.textContent), ['first×', 'second×']);
+  assert.equal(t.a.q('[data-tabs] .tab.active').dataset.tab, '1');
+  assert.equal(t.a.input.value, '{"second": 2}');
+  t.click(t.a.q('[data-tab="0"]'));
+  await sleep(380);
+  assert.equal(t.a.input.value, '{"first": 1}');
+});
+/** Like boot(), but sessionStorage is filled before studio.js runs (boot() cannot, the window does not exist yet). */
+async function bootSeeded(session) {
+  const html = fs.readFileSync(path.join(ROOT, 'studio.html'), 'utf8').replace(/<script[^>]*src=[^>]*><\/script>/g, '');
+  const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'http://localhost/studio.html', pretendToBeVisual: true });
+  const w = dom.window;
+  w.sessionStorage.setItem('jsstudio.session.v1', JSON.stringify(session));
+  w.console.warn = () => {};
+  w.matchMedia = () => ({ matches: false, addEventListener() {} });
+  w.Element.prototype.scrollIntoView = function () {};
+  Object.assign(w, { TextDecoder, TextEncoder, Blob, Response, DecompressionStream });
+  Object.defineProperty(w.navigator, 'clipboard', { value: { writeText: async () => {}, readText: async () => '' } });
+  w.confirm = () => true;
+  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
+  w.JSS.setLogLevel('error');
+  w.eval(fs.readFileSync(path.join(ROOT, 'studio.js'), 'utf8'));
+  await sleep(120);
+  const click = (el) => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
+  const root = w.document.querySelector('.docpane[data-pane="a"]');
+  return { w, click, a: { q: (s) => root.querySelector(s), qa: (s) => [...root.querySelectorAll(s)], input: root.querySelector('[data-input]') } };
+}
+
+test('recent files: opened files are listed and reopen in a new tab; the list can be cleared', async () => {
+  const t = await boot();
+  const log = [];
+  t.w.showOpenFilePicker = async () => [fakeHandle('seen.json', '{"seen": true}', log)];
+  t.a.act('open');
+  await sleep(400);
+  t.b.act('recent');
+  await sleep(60);
+  assert.deepEqual([...t.w.document.querySelectorAll('.menu button')].map((b) => b.textContent), ['seen.json', 'Clear recent files'], 'the list is shared by both panes');
+  t.click(t.w.document.querySelector('.menu button'));
+  await sleep(450);
+  assert.equal(t.b.input.value, '{"seen": true}');
+  assert.equal(t.w.document.querySelector('.menu'), null, 'the menu closes');
+  t.a.act('recent');
+  await sleep(60);
+  t.click([...t.w.document.querySelectorAll('.menu button')].find((b) => /Clear/.test(b.textContent)));
+  await sleep(30);
+  t.a.act('recent');
+  await sleep(60);
+  assert.match(t.w.document.querySelector('.menu').textContent, /No recent files/);
+  key(t.w, t.w.document.querySelector('.menu button') || t.w.document.querySelector('.menu'), 'Escape');
+  assert.deepEqual(t.errors, []);
+});
+
+test('undo / redo of tree edits, apply format and clear', async () => {
+  const t = await boot();
+  await t.a.type('{"a":1}');
+  t.a.view('tree');
+  assert.equal(t.a.q('[data-act="undo"]').disabled, true, 'nothing to undo yet');
+  t.a.rows()[1].querySelector('.val').dispatchEvent(new t.w.MouseEvent('dblclick', { bubbles: true }));
+  const input = t.a.q('[data-tree] input.edit');
+  input.value = '2';
+  key(t.w, input, 'Enter');
+  await sleep(400);
+  assert.match(t.a.input.value, /"a": 2/);
+  assert.equal(t.a.q('[data-act="undo"]').disabled, false);
+  t.a.act('undo');
+  await sleep(400);
+  assert.equal(t.a.input.value, '{"a":1}', 'the exact original text is back');
+  assert.equal(t.a.q('[data-act="redo"]').disabled, false);
+  t.a.act('redo');
+  await sleep(400);
+  assert.match(t.a.input.value, /"a": 2/);
+  key(t.w, t.a.q('[data-tree]'), 'z', { ctrlKey: true });
+  await sleep(400);
+  assert.equal(t.a.input.value, '{"a":1}', 'Ctrl+Z in the tree');
+  key(t.w, t.a.q('[data-tree]'), 'z', { ctrlKey: true, shiftKey: true });
+  await sleep(400);
+  assert.match(t.a.input.value, /"a": 2/, 'Ctrl+Shift+Z');
+  t.a.act('clear');
+  await sleep(380);
+  assert.equal(t.a.input.value, '');
+  t.a.act('undo');
+  await sleep(400);
+  assert.match(t.a.input.value, /"a": 2/, 'even Clear can be undone');
+  assert.deepEqual(t.errors, []);
+});
+
+test('find and replace in Raw: marks, navigation, regex, case, replace one / all', async () => {
+  const t = await boot();
+  await t.a.type('{"name": "Ann", "alias": "ann", "n": 12, "m": 345}');
+  const bar = t.a.q('[data-view-raw] .findbar');
+  assert.equal(bar.hidden, true);
+  t.a.act('find-raw');
+  assert.equal(bar.hidden, false);
+  const [term, repl] = bar.querySelectorAll('input.field');
+  const [rx, cs] = bar.querySelectorAll('input[type="checkbox"]');
+  const set = (el, v) => { el.value = v; el.dispatchEvent(new t.w.Event('input', { bubbles: true })); };
+  const count = () => bar.querySelector('.meta').textContent;
+  set(term, 'ann');
+  assert.equal(count(), '1 / 2', 'case-insensitive by default');
+  assert.equal(t.a.qa('[data-view-raw] .ed-find mark').length, 2);
+  assert.equal(t.a.qa('[data-view-raw] .ed-find mark.cur').length, 1, 'the current match is distinct');
+  assert.equal(t.a.q('[data-view-raw] .ed-find').textContent, t.a.input.value, 'marks mirror the text exactly');
+  key(t.w, term, 'Enter');
+  assert.equal(count(), '2 / 2');
+  key(t.w, term, 'Enter', { shiftKey: true });
+  assert.equal(count(), '1 / 2');
+  cs.checked = true; cs.dispatchEvent(new t.w.Event('change'));
+  assert.equal(count(), '1 / 1', 'match case');
+  cs.checked = false; cs.dispatchEvent(new t.w.Event('change'));
+  rx.checked = true; rx.dispatchEvent(new t.w.Event('change'));
+  set(term, '\\d+');
+  assert.equal(count(), '1 / 2');
+  set(term, '(');
+  assert.equal(count(), 'invalid regex');
+  assert.ok(term.classList.contains('bad'));
+  set(term, '(\\d)(\\d)');
+  set(repl, '$2$1');
+  const btn = (txt) => [...bar.querySelectorAll('button')].find((b) => b.textContent === txt);
+  t.click(btn('Replace'));
+  await sleep(380);
+  assert.match(t.a.input.value, /"n": 21,/, 'replace the current match with capture groups');
+  rx.checked = false; rx.dispatchEvent(new t.w.Event('change'));
+  set(term, 'ann'); set(repl, 'Bob');
+  t.click(btn('All'));
+  await sleep(380);
+  assert.match(t.a.input.value, /"name": "Bob", "alias": "Bob"/);
+  assert.match(t.$('toast').textContent, /Replaced 2 matches/);
+  assert.equal(t.a.chips()[0], 'JSON', 'the document re-parsed after replacing');
+  key(t.w, term, 'Escape');
+  assert.equal(bar.hidden, true);
+  assert.equal(t.a.qa('[data-view-raw] .ed-find mark').length, 0, 'closing clears the marks');
+  assert.deepEqual(t.errors, []);
+});
+
+test('Ctrl/Cmd+F opens find in the editor and prefills a selected word; Preview has its own find', async () => {
+  const t = await boot();
+  await t.a.type('{"findme": 1}');
+  t.a.input.focus();
+  t.a.input.setSelectionRange(2, 8);
+  key(t.w, t.a.input, 'f', { ctrlKey: true });
+  const bar = t.a.q('[data-view-raw] .findbar');
+  assert.equal(bar.hidden, false);
+  assert.equal(bar.querySelector('input.field').value, 'findme');
+  t.a.view('preview');
+  t.a.act('find-preview');
+  assert.equal(t.a.q('[data-view-preview] .findbar').hidden, false);
+});
+
+test('editor: Enter keeps and adds indentation, Tab indents, bracket pairs are marked', async () => {
+  const t = await boot();
+  const ta = t.a.input;
+  ta.focus();
+  ta.value = '{'; ta.setSelectionRange(1, 1);
+  key(t.w, ta, 'Enter');
+  assert.equal(ta.value, '{\n  ');
+  assert.equal(ta.selectionStart, 4);
+  ta.value = '[]'; ta.setSelectionRange(1, 1);
+  key(t.w, ta, 'Enter');
+  assert.equal(ta.value, '[\n  \n]');
+  assert.equal(ta.selectionStart, 4, 'the closer moves to its own line, caret in between');
+  ta.value = 'a\nb'; ta.setSelectionRange(0, 3);
+  key(t.w, ta, 'Tab');
+  assert.equal(ta.value, '  a\n  b', 'multi-line indent');
+  key(t.w, ta, 'Tab', { shiftKey: true });
+  assert.equal(ta.value, 'a\nb', 'outdent');
+  ta.value = 'x'; ta.setSelectionRange(1, 1);
+  key(t.w, ta, 'Escape');
+  const tab = new t.w.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  ta.dispatchEvent(tab);
+  assert.equal(tab.defaultPrevented, false, 'after Esc, Tab is left to the browser so focus can leave the editor');
+  assert.equal(ta.value, 'x');
+  const tab2 = new t.w.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  ta.dispatchEvent(tab2);
+  assert.equal(tab2.defaultPrevented, true, 'Tab indents again afterwards');
+  assert.equal(ta.value, 'x  ');
+  ta.value = '{"a": [1]}'; ta.setSelectionRange(1, 1);
+  ta.dispatchEvent(new t.w.Event('input', { bubbles: true }));
+  ta.setSelectionRange(1, 1);
+  ta.dispatchEvent(new t.w.KeyboardEvent('keyup', { bubbles: true }));
+  const marks = [...t.a.qa('[data-view-raw] .ed-brk mark')].map((m) => m.textContent);
+  assert.deepEqual(marks, ['{', '}'], 'caret beside a bracket highlights its partner');
+  ta.setSelectionRange(0, 3);
+  ta.dispatchEvent(new t.w.KeyboardEvent('keyup', { bubbles: true }));
+  assert.equal(t.a.qa('[data-view-raw] .ed-brk mark').length, 0, 'not while selecting');
+});
+
+test('export formats in Preview: YAML, CSV, TypeScript, JSON Schema are read-only; switching back edits again', async () => {
+  const t = await boot();
+  await t.a.type('[{"id": 1, "tags": ["a"]}, {"id": 2}]');
+  t.a.view('preview');
+  const style = t.a.q('[data-f-style]');
+  const ta = t.a.q('[data-pinput]');
+  assert.ok([...style.querySelectorAll('optgroup option')].map((o) => o.value).includes('yaml'));
+  const pick = (v) => { style.value = v; style.dispatchEvent(new t.w.Event('change')); };
+  pick('yaml');
+  assert.equal(ta.value, '- id: 1\n  tags:\n    - a\n- id: 2\n');
+  assert.equal(ta.readOnly, true);
+  assert.equal(t.a.q('[data-f-indent]').disabled, true);
+  assert.match(t.a.q('[data-f-note]').textContent, /Read-only export/);
+  pick('csv');
+  assert.equal(ta.value, 'id,tags[0]\n1,a\n2,\n');
+  pick('ts');
+  assert.match(ta.value, /export interface Root \{\n {2}id: number;\n {2}tags\?: string\[\];\n\}/);
+  pick('schema');
+  assert.equal(JSON.parse(ta.value).type, 'array');
+  assert.equal(t.a.input.value, '[{"id": 1, "tags": ["a"]}, {"id": 2}]', 'exports never touch the document');
+  pick('json');
+  assert.equal(ta.readOnly, false);
+  assert.equal(t.a.q('[data-f-indent]').disabled, false);
+  assert.match(ta.value, /^\[\n {2}\{/);
+  pick('yaml');
+  t.a.view('tree');
+  await t.a.type("{'k': True}");
+  t.a.view('tree');
+  t.click(t.a.rows()[0].querySelector('[data-act="add"]'));
+  await sleep(400);
+  assert.match(t.a.input.value, /'newKey': None/, 'editing the tree while an export format is selected keeps the document\'s own format');
+  assert.deepEqual(t.errors, []);
+});
+
+test('validate: A against the schema in B; errors link to the tree; infer; not-checked keywords are named', async () => {
+  const t = await boot();
+  t.click(t.q('#modeSwitch [data-mode="validate"]'));
+  assert.equal(t.$('stage').dataset.mode, 'validate');
+  assert.equal(t.$('valPanel').hidden, false);
+  assert.equal(t.$('layoutSwitch').hidden, true);
+  assert.match(t.$('vBody').textContent, /Put the document in pane A/);
+  await t.a.type('{"id": "x", "tags": [1], "extra": true}');
+  await t.b.type(JSON.stringify({ type: 'object', required: ['id', 'name'], additionalProperties: false, properties: { id: { type: 'integer' }, name: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, dependentRequired: {} }));
+  await sleep(300);
+  assert.equal(t.q('#vStats .chip').textContent, '4 errors');
+  assert.match(t.$('vStats').textContent, /not checked: dependentRequired/);
+  const rows = t.qa('#vBody .v-row').map((r) => r.querySelector('.v-path').textContent + ' ' + r.querySelector('.chip').textContent);
+  assert.deepEqual(rows.sort(), ['$ required', '$.extra additionalProperties', '$.id type', '$.tags[0] type'].sort());
+  t.click(t.qa('#vBody .v-row').find((r) => /tags\[0\]/.test(r.textContent)));
+  assert.deepEqual(t.a.visibleView(), ['tree'], 'clicking an error shows it in the tree of A');
+  assert.ok(t.a.q('[data-tree] .row.flash, [data-tree] .row'), 'tree rendered');
+  await t.a.type('{"id": 1, "name": "n"}');
+  await sleep(300);
+  assert.equal(t.q('#vStats .chip').textContent, 'Valid');
+  await t.b.type('{broken');
+  await sleep(300);
+  assert.match(t.$('vBody').textContent, /Both panes need valid content/);
+  t.click('vInfer');
+  await sleep(450);
+  assert.match(t.b.input.value, /\$schema/);
+  assert.equal(t.q('#vStats .chip').textContent, 'Valid', 'the inferred schema accepts its own sample');
+  assert.equal(t.b.qa('[data-tabs] .tab').length, 2, 'the broken schema was kept in its own tab');
+  t.click(t.q('#modeSwitch [data-mode="viewer"]'));
+  assert.equal(t.$('valPanel').hidden, true);
+  assert.deepEqual(t.errors, []);
+});
+
+test('command palette: Ctrl/Cmd+K, filter, run, Escape; commands reflect state', async () => {
+  const t = await boot();
+  const doc = t.w.document;
+  doc.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+  assert.equal(t.$('palette').hidden, false);
+  assert.equal(doc.activeElement, t.$('palInput'));
+  const titles = () => [...t.w.document.querySelectorAll('#palList li')].map((l) => l.firstChild.textContent);
+  assert.ok(titles().includes('Mode: Compare'));
+  assert.ok(!titles().includes('A: undo edit'), 'unavailable commands are not offered');
+  assert.ok(!titles().includes('Mode: Viewer'), 'nor the state that is already active');
+  const set = (v) => { t.$('palInput').value = v; t.$('palInput').dispatchEvent(new t.w.Event('input')); };
+  set('compare');
+  assert.deepEqual(titles(), ['Mode: Compare']);
+  key(t.w, t.$('palInput'), 'Enter');
+  assert.equal(t.$('stage').dataset.mode, 'compare');
+  assert.equal(t.$('palette').hidden, true);
+  // pane commands target the pane in use
+  t.b.input.dispatchEvent(new t.w.Event('focusin', { bubbles: true }));
+  doc.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true, cancelable: true }));
+  set('show tree');
+  assert.deepEqual(titles(), ['B: show Tree']);
+  key(t.w, t.$('palInput'), 'Enter');
+  assert.deepEqual(t.b.visibleView(), ['tree']);
+  assert.deepEqual(t.a.visibleView(), ['raw']);
+  // format options, arrows and Escape
+  t.click('btnPalette');
+  set('yaml');
+  assert.deepEqual(titles(), ['Preview format: YAML (export)']);
+  set('indent');
+  key(t.w, t.$('palInput'), 'ArrowDown');
+  assert.equal(t.w.document.querySelector('#palList li.sel').textContent.startsWith('Preview indent'), true);
+  key(t.w, t.$('palInput'), 'Escape');
+  assert.equal(t.$('palette').hidden, true);
+  set('');
+  t.click('btnPalette');
+  set('indent: 4');
+  key(t.w, t.$('palInput'), 'Enter');
+  assert.equal(JSON.parse(t.w.localStorage.getItem('jsstudio.prefs.v1')).indent, '4');
+  assert.deepEqual(t.errors, []);
+});
+
+test('tree keyboard: arrows move and fold, Enter edits, F2 renames, Delete removes', async () => {
+  const t = await boot();
+  await t.a.type('{"a": 1, "list": [10, 20], "z": "last"}');
+  t.a.view('tree');
+  const tree = t.a.q('[data-tree]');
+  const sel = () => t.a.q('[data-tree] .row.sel') && t.rowText(t.a.q('[data-tree] .row.sel'));
+  key(t.w, tree, 'ArrowDown');
+  assert.equal(sel(), '▾{3}', 'first Down selects the first row');
+  key(t.w, tree, 'ArrowDown');
+  assert.equal(sel(), '"a": 1');
+  key(t.w, tree, 'ArrowDown');
+  assert.match(sel(), /^▾"list"/);
+  key(t.w, tree, 'ArrowLeft');
+  assert.match(sel(), /^▸"list"/, 'Left folds an open node');
+  key(t.w, tree, 'ArrowRight');
+  assert.match(sel(), /^▾"list"/, 'Right opens a closed node');
+  key(t.w, tree, 'ArrowRight');
+  assert.equal(sel(), '0: 10', 'Right on an open node enters it');
+  key(t.w, tree, 'ArrowLeft');
+  assert.match(sel(), /^▾"list"/, 'Left on a leaf goes to the parent');
+  key(t.w, tree, 'End');
+  assert.equal(sel(), '"z": "last"');
+  key(t.w, tree, 'Home');
+  assert.equal(sel(), '▾{3}');
+  key(t.w, tree, 'ArrowDown');
+  key(t.w, tree, 'Enter');
+  const input = t.a.q('[data-tree] input.edit');
+  assert.ok(input, 'Enter edits a value');
+  input.value = '7';
+  key(t.w, input, 'Enter');
+  await sleep(400);
+  assert.match(t.a.input.value, /"a": 7/);
+  assert.equal(sel(), '"a": 7', 'the selection survives the edit');
+  key(t.w, tree, 'F2');
+  const kin = t.a.q('[data-tree] input.edit');
+  assert.ok(kin, 'F2 renames the key');
+  kin.value = 'first';
+  key(t.w, kin, 'Enter');
+  await sleep(400);
+  assert.match(t.a.input.value, /"first": 7/);
+  t.a.rows().find((r) => /"first"/.test(t.rowText(r))).dispatchEvent(new t.w.MouseEvent('click', { bubbles: true }));
+  key(t.w, tree, 'Delete');
+  await sleep(400);
+  assert.ok(!/first/.test(t.a.input.value), 'Delete removes the selected entry');
+  assert.deepEqual(t.errors, []);
 });
