@@ -19,6 +19,8 @@
   const GUTTER_PX = 52; // room for the row-number gutter at the left of every tree row (matches .row::before in studio.css)
   const DIFF_BUDGET = 6000;
   const WORKER_MIN_CHARS = 200000;
+  const VIEWS = ['raw', 'preview', 'tree'];
+  const isUntitled = (n) => /^Untitled( \d+)?$/.test(n);
   const PICKER_TYPES = [{
     description: 'JSON / text',
     accept: {
@@ -41,6 +43,12 @@
   }
   const debounce = (fn, ms) => { let t; const w = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; w.now = (...a) => { clearTimeout(t); fn(...a); }; return w; };
   const fmtBytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+  /** 2, 4 or 'tab' when the text is already indented that way, else null (so edits keep the document's own layout). */
+  function detectIndent(text) {
+    const m = /\n([ \t]+)\S/.exec(text.slice(0, 20000));
+    if (!m) return null;
+    return m[1][0] === '\t' ? 'tab' : m[1].length === 2 ? 2 : m[1].length === 4 ? 4 : null;
+  }
   const clampRatio = (v, dflt) => (Number.isFinite(Number(v)) && v !== null ? Math.min(0.85, Math.max(0.15, Number(v))) : dflt);
   const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? '' : 's'}`;
 
@@ -189,7 +197,7 @@
     const r = anchor.getBoundingClientRect();
     const menu = h('div', { class: 'menu', role: 'menu', style: `left:${Math.max(4, Math.min(r.left, innerWidth - 240))}px;top:${r.bottom + 4}px` });
     if (!items.length) menu.append(h('div', { class: 'empty-item', text: emptyText }));
-    for (const it of items) menu.append(h('button', { role: 'menuitem', title: it.title || null, text: it.label, onclick: () => { closeMenu(); it.run(); } }));
+    for (const it of items) menu.append(it.sep ? h('div', { class: 'menu-sep', role: 'separator' }) : h('button', { role: 'menuitem', title: it.title || null, text: it.label, onclick: () => { closeMenu(); it.run(); } }));
     document.body.append(menu);
     openMenu = menu;
     const first = menu.querySelector('button');
@@ -262,6 +270,58 @@
     }
     if (last < text.length) frag.append(text.slice(last));
     pre.append(frag);
+  }
+
+  /** A small modal form. Resolves to {name: value} on submit, or null when cancelled (Esc, click outside, Cancel). */
+  function askForm(title, fields, submitLabel) {
+    return new Promise((resolve) => {
+      const prev = document.activeElement;
+      const controls = {};
+      const rows = fields.map((f) => {
+        const c = f.type === 'select'
+          ? h('select', { class: 'field' }, f.options.map(([v, l]) => h('option', { value: v, selected: v === f.value, text: l })))
+          : h('input', { class: 'field', type: 'text', value: f.value || '', placeholder: f.placeholder || null, spellcheck: 'false', autocomplete: 'off' });
+        controls[f.name] = c;
+        return h('label', { class: 'modal-row' }, h('span', { text: f.label }), c, f.hint ? h('small', { class: 'meta', text: f.hint }) : null);
+      });
+      const done = (vals) => { overlay.remove(); if (prev && prev.focus && document.contains(prev)) prev.focus(); resolve(vals); };
+      const form = h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        h('h2', { text: title }), ...rows,
+        h('div', { class: 'modal-actions' }, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: () => done(null) }), h('button', { type: 'submit', class: 'btn primary', text: submitLabel || 'OK' })));
+      const overlay = h('div', { class: 'modal-overlay' }, form);
+      form.addEventListener('submit', (e) => { e.preventDefault(); done(Object.fromEntries(Object.entries(controls).map(([k, c]) => [k, c.value]))); });
+      overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); } });
+      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) done(null); });
+      document.body.append(overlay);
+      Object.values(controls)[0].focus();
+    });
+  }
+
+  /** The Transform menu (also the palette's transform commands). Every entry rewrites the pane's document text. */
+  function transformDefs(p) {
+    const T = JSS.transform;
+    const run = (label, fn) => () => p.runTransform(label, fn);
+    return [
+      { label: 'Sort keys A → Z', title: 'Alphabetical (natural: k2 before k10), at every depth', run: run('Sort keys', (n) => T.sortKeys(n, { order: 'asc' })) },
+      { label: 'Sort keys Z → A', run: run('Sort keys', (n) => T.sortKeys(n, { order: 'desc' })) },
+      { label: 'Sort arrays…', title: 'By a field (price, owner.name) or by value, ascending or descending', run: () => p.askSortArrays() },
+      { sep: true },
+      { label: 'Pretty-print (2 spaces)', run: run('Pretty-print', (n) => ({ node: n, changes: 1, indent: 2 })) },
+      { label: 'Pretty-print (4 spaces)', run: run('Pretty-print', (n) => ({ node: n, changes: 1, indent: 4 })) },
+      { label: 'Pretty-print (tabs)', run: run('Pretty-print', (n) => ({ node: n, changes: 1, indent: 'tab' })) },
+      { label: 'Minify', title: 'Remove all whitespace', run: run('Minify', (n) => ({ node: n, changes: 1, indent: 0 })) },
+      { sep: true },
+      { label: 'Remove nulls and empty values', title: 'null, "", [] and {} (a container emptied by this is removed too)', run: run('Remove empty values', (n) => T.removeEmpty(n)) },
+      { label: 'Remove duplicate array items', run: run('Remove duplicates', (n) => T.dedupe(n)) },
+      { label: 'Flatten to dotted keys', title: '{"a": {"b": 1}} becomes {"a.b": 1}', run: run('Flatten', (n) => T.flatten(n)) },
+      { label: 'Unflatten dotted keys', title: '{"a.b": 1} becomes {"a": {"b": 1}}', run: run('Unflatten', (n) => T.unflatten(n)) },
+      { label: 'Stringify (escape as a JSON string)', run: run('Stringify', (n) => T.stringify(n)) },
+      { label: 'Parse a JSON string (unescape)', title: 'Replace escaped / quoted JSON text with the document it contains', run: run('Parse string', (n) => (p.res.steps.some((st) => ['string', 'unescape', 'url', 'html'].includes(st.kind)) ? { node: n, changes: 1, note: 'the unwrapped document replaced the escaped text' } : T.unescape(n))) },
+      { sep: true },
+      { label: 'Convert to JSON', run: run('Convert to JSON', (n) => ({ node: n, changes: 1, style: 'json' })) },
+      { label: 'Convert to Python', run: run('Convert to Python', (n) => ({ node: n, changes: 1, style: 'python' })) },
+      { label: 'Convert to JavaScript', run: run('Convert to JavaScript', (n) => ({ node: n, changes: 1, style: 'js' })) },
+    ];
   }
 
   // ====================================================================== code editor (line numbers, colours, find, brackets)
@@ -517,7 +577,7 @@
       this.prevEd = new Editor(this.q('[data-editor="preview"]'), `${side}:preview`);
       Object.assign(this, {
         undo: [], redo: [], selKey: null, // per-document edit history (whole-document snapshots) and the keyboard-selected tree row
-        tabs: [null], tab: 0, skipScroll: null,
+        tabs: [null], tab: 0, skipScroll: null, renaming: false,
         pvKeep: null, // text typed in the Preview editor; kept as shown (not re-formatted) while it equals the raw text
         pendingEdit: null,
         text: '', res: null, seq: 0, pick: undefined, view: prefs.panes[side].view, depth: prefs.depth,
@@ -559,6 +619,10 @@
         const t = e.target.closest('[data-tab]');
         if (t) this.loadTab(Number(t.dataset.tab));
       });
+      this.q('[data-tabs]').addEventListener('dblclick', (e) => {
+        const t = e.target.closest('[data-tab]');
+        if (t && !e.target.closest('[data-close]')) this.renameTab(Number(t.dataset.tab));
+      });
       for (const [el, name] of [[this.input, 'raw'], [this.pinput, 'preview'], [this.q('[data-tree]'), 'tree']]) el.addEventListener('scroll', () => this.onScroll(el, name));
       this.q('[data-tree]').addEventListener('keydown', (e) => this.onTreeKey(e));
       this.root.addEventListener('click', (e) => {
@@ -572,6 +636,7 @@
           download: () => this.download(), 'save-fmt': () => this.saveFormatted(),
           'find-raw': () => this.rawEd.openFind(), 'find-preview': () => this.prevEd.openFind(),
           undo: () => this.undoEdit(), redo: () => this.redoEdit(),
+          transform: () => showMenu(b, transformDefs(this), ''),
           max: () => setMax(maxSide === this.side ? null : this.side),
           newtab: () => this.newTab(), recent: () => this.showRecent(b),
           prev: () => this.goToMatch(this.idx - 1), next: () => this.goToMatch(this.idx + 1),
@@ -647,14 +712,54 @@
 
     // ---------------------------------------------------------------- tabs (several documents per pane)
     snapshot() {
-      this.tabs[this.tab] = { text: this.input.value, name: this.name, handle: this.handle, mtime: this.mtime, dirty: this.dirty, undo: this.undo, redo: this.redo };
+      this.tabs[this.tab] = { text: this.input.value, name: this.name, view: this.view, handle: this.handle, mtime: this.mtime, dirty: this.dirty, undo: this.undo, redo: this.redo };
     }
     applyDoc(d) {
       this.input.value = d.text; this.name = d.name; this.handle = d.handle; this.mtime = d.mtime; this.dirty = d.dirty;
       this.undo = d.undo; this.redo = d.redo;
+      // every tab keeps its own view: switching tabs switches Raw / Preview / Tree with it
+      this.view = VIEWS.includes(d.view) ? d.view : 'raw';
+      prefs.panes[this.side].view = this.view;
       this.pick = undefined; this.repairInfo = null; this.pvKeep = null; this.selKey = null;
     }
-    blankDoc() { return { text: '', name: 'Untitled', handle: null, mtime: 0, dirty: false, undo: [], redo: [] }; }
+    blankDoc() { return { text: '', name: this.nextUntitled(), view: 'raw', handle: null, mtime: 0, dirty: false, undo: [], redo: [] }; }
+    /** 'Untitled' for the first, then 'Untitled 2', 'Untitled 3'… (the lowest number not in use in this pane). */
+    nextUntitled() {
+      const used = new Set(this.tabs.map((d, i) => (i === this.tab ? this.name : d && d.name)));
+      if (!used.has('Untitled')) return 'Untitled';
+      for (let n = 2; ; n++) if (!used.has(`Untitled ${n}`)) return `Untitled ${n}`;
+    }
+    /** Inline rename of tab `i` (double-click the tab, or the palette). A tab linked to a file on disk is detached from it. */
+    renameTab(i) {
+      const strip = this.q('[data-tabs]');
+      const btn = strip.querySelector(`[data-tab="${i}"]`);
+      if (!btn || this.renaming) return;
+      if (i !== this.tab) this.loadTab(i);
+      const cur = this.q(`[data-tab="${i}"]`);
+      const input = h('input', { class: 'field tab-edit', value: this.name, 'aria-label': 'Document name', maxlength: '80', size: String(Math.max(8, Math.min(30, this.name.length + 2))) });
+      this.renaming = true;
+      cur.replaceWith(input);
+      input.focus();
+      input.select();
+      let done = false;
+      const finish = (commit) => {
+        if (done) return;
+        done = true;
+        this.renaming = false;
+        const name = input.value.trim().replace(/[\\/\u0000-\u001f]/g, '-');
+        if (commit && name && name !== this.name) {
+          if (this.handle && !confirm(`"${this.name}" is linked to a file on disk. Renaming detaches this tab from it: Save will ask where to save "${name}".\n\nContinue?`)) { this.renderTabs(); return; }
+          log('info', 'tab-rename', { pane: this.side, detached: Boolean(this.handle) });
+          this.name = name;
+          if (this.handle) { this.handle = null; this.mtime = 0; }
+          this.dirty = false;
+          persistSession();
+        }
+        this.render();
+      };
+      input.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); finish(true); } else if (e.key === 'Escape') { e.preventDefault(); finish(false); } });
+      input.addEventListener('blur', () => finish(true));
+    }
     /** Adds an empty document and makes it current, without re-parsing (the caller fills it in). */
     pushBlankTab() {
       this.snapshot();
@@ -688,13 +793,14 @@
     }
     stepTab(d) { if (this.tabs.length > 1) this.loadTab((this.tab + d + this.tabs.length) % this.tabs.length); }
     renderTabs() {
+      if (this.renaming) return; // keep the name box alive while it is open
       const strip = this.q('[data-tabs]');
       strip.replaceChildren();
       this.tabs.forEach((doc, i) => {
         const cur = i === this.tab;
         const name = cur ? this.name : doc.name;
         const dirty = cur ? this.dirty && this.handle : doc.dirty && doc.handle;
-        strip.append(h('button', { class: `tab${cur ? ' active' : ''}`, role: 'tab', 'aria-selected': String(cur), 'data-tab': String(i), title: name },
+        strip.append(h('button', { class: `tab${cur ? ' active' : ''}`, role: 'tab', 'aria-selected': String(cur), 'data-tab': String(i), title: `${name} (double-click to rename)` },
           trunc(name, 22) + (dirty ? ' ●' : ''), h('span', { class: 'x', 'data-close': String(i), title: 'Close', 'aria-label': `Close ${name}`, text: '×' })));
       });
       strip.append(h('button', { class: 'tab-add', 'data-act': 'newtab', title: 'New document in this pane', 'aria-label': 'New document', text: '+' }));
@@ -814,6 +920,7 @@
       this.q('[data-act="saveas"]').disabled = !this.text;
       this.qa('[data-view-preview] .toolbar2 button, [data-view-preview] .toolbar2 select, [data-view-preview] .toolbar2 input').forEach((c) => { c.disabled = !ok; });
       this.qa('[data-tree-bar] button, [data-tree-bar] input, [data-tree-bar] select').forEach((c) => { if (c !== emb) c.disabled = !ok; });
+      this.qa('[data-act="transform"]').forEach((c) => { c.disabled = !ok; });
       this.q('[data-act="undo"]').disabled = !ok || !this.undo.length;
       this.q('[data-act="redo"]').disabled = !ok || !this.redo.length;
       this.q('[data-act="max"]').setAttribute('aria-pressed', String(maxSide === this.side));
@@ -1105,13 +1212,60 @@
       this.syncInputFromTree();
     }
 
-    syncInputFromTree() {
+    /** The document's own format ('json' | 'python' | 'js'), whatever the Preview happens to show. */
+    sourceStyle() {
+      const f = this.res && this.res.format;
+      return f === 'python' ? 'python' : f === 'javascript' || f === 'json5' ? 'js' : 'json';
+    }
+
+    /**
+     * Writes `node` back as the pane's text (own format unless o.style, o.indent overrides), with history and a re-parse.
+     * With o.skipIfSame, returns null instead of rewriting when the text would not change.
+     */
+    writeNode(node, o) {
+      o = o || {};
+      const own = detectIndent(this.input.value);
+      const indent = o.indent !== undefined ? o.indent : own !== null ? own : this.indentOpt() === 0 ? 2 : this.indentOpt();
+      const out = serialize(node, { style: o.style || this.sourceStyle(), indent, sortKeys: false });
+      if (o.skipIfSame && out.text.trim() === this.input.value.trim()) return null;
       this.pushHistory();
-      const out = serialize(this.res.node, { style: this.outputStyle(), indent: this.indentOpt() === 0 ? 2 : this.indentOpt(), sortKeys: false });
       this.input.value = out.text;
+      this.repairInfo = null;
       this.dirty = true;
       persistSession();
       this.reload({ keepView: true });
+      return out;
+    }
+
+    syncInputFromTree() { this.writeNode(this.res.node); }
+
+    // ---------------------------------------------------------------- transforms (sort, minify, clean up, convert)
+    runTransform(label, fn) {
+      if (!this.ok) return toast('Fix the error shown above first: transforms need a valid document.', 'error');
+      const t0 = performance.now();
+      let r;
+      try { r = fn(JSS.ast.clone(this.res.node)); } catch (err) {
+        log('error', 'transform-failed', { pane: this.side, op: label, error: String(err) });
+        return toast(`${label} failed: ${err.message || err}`, 'error');
+      }
+      if (r.error) { log('warn', 'transform-rejected', { pane: this.side, op: label }); return toast(r.error, 'error'); }
+      if (!r.changes) return toast(`${label}: ${r.note || 'nothing to change'}`);
+      const out = this.writeNode(r.node, { indent: r.indent, style: r.style, skipIfSame: true });
+      log('info', 'transform', { pane: this.side, op: label, changes: r.changes, written: Boolean(out), ms: Math.round(performance.now() - t0) });
+      if (!out) return toast(`${label}: nothing to change, the text is already like that.`);
+      const warn = out.warnings && out.warnings.length ? ` (${out.warnings.slice(0, 2).join('; ')})` : '';
+      toast(`${label}: ${r.note || plural(r.changes, 'change')}${warn}. Undo is in the Tree toolbar.`);
+    }
+
+    async askSortArrays() {
+      if (!this.ok) return toast('Fix the error shown above first: transforms need a valid document.', 'error');
+      const v = await askForm('Sort arrays', [
+        { name: 'by', label: 'Sort by field', placeholder: 'e.g. price, owner.name, items[0].id', hint: 'Leave blank to sort the values themselves (numbers, then strings). Items without the field go last.', value: '' },
+        { name: 'order', type: 'select', label: 'Order', value: 'asc', options: [['asc', 'Ascending (A → Z, 1 → 9)'], ['desc', 'Descending (Z → A, 9 → 1)']] },
+        { name: 'scope', type: 'select', label: 'Apply to', value: 'all', options: [['all', 'Every array in the document'], ['top', 'Only the top-level array']] },
+      ], 'Sort');
+      if (!v) return;
+      this.runTransform('Sort arrays', (n) => JSS.transform.sortArrays(n, { by: v.by, order: v.order, deep: v.scope === 'all' }));
     }
 
     // ---------------------------------------------------------------- search
@@ -1530,7 +1684,7 @@
     else if (m.status === 'removed') plainRows(grid, m.a, m.path, depth + 1, 'removed', 'a', ctx);
   }
 
-  const headerRow = () => h('div', { class: 'hdr' }, h('div', { text: `A${panes.a.name !== 'Untitled' ? ` · ${panes.a.name}` : ''}` }), h('div', { text: `B${panes.b.name !== 'Untitled' ? ` · ${panes.b.name}` : ''}` }));
+  const headerRow = () => h('div', { class: 'hdr' }, h('div', { text: `A${!isUntitled(panes.a.name) ? ` · ${panes.a.name}` : ''}` }), h('div', { text: `B${!isUntitled(panes.b.name) ? ` · ${panes.b.name}` : ''}` }));
 
   function renderDiffTree() {
     const body = $('cBody');
@@ -1745,7 +1899,7 @@
     for (const side of ['a', 'b']) {
       const p = panes[side];
       p.snapshot();
-      payload[side] = { text: cap(p.input.value), name: p.name, tab: p.tab, tabs: p.tabs.map((d) => ({ text: cap(d.text), name: d.name })) };
+      payload[side] = { text: cap(p.input.value), name: p.name, tab: p.tab, view: p.view, tabs: p.tabs.map((d) => ({ text: cap(d.text), name: d.name, view: d.view })) };
     }
     try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload)); } catch (err) { log('warn', 'session-persist-failed', { error: String(err) }); }
   }
@@ -1759,8 +1913,9 @@
         panes[side].input.value = p.text || '';
         panes[side].name = p.name || 'Untitled';
         if (Array.isArray(p.tabs) && p.tabs.length > 1) {
-          panes[side].tabs = p.tabs.map((d) => ({ text: String(d.text || ''), name: d.name || 'Untitled', handle: null, mtime: 0, dirty: false, undo: [], redo: [] }));
+          panes[side].tabs = p.tabs.map((d) => ({ text: String(d.text || ''), name: d.name || 'Untitled', view: VIEWS.includes(d.view) ? d.view : 'raw', handle: null, mtime: 0, dirty: false, undo: [], redo: [] }));
           panes[side].tab = Math.min(Math.max(0, Number(p.tab) || 0), panes[side].tabs.length - 1);
+          panes[side].view = panes[side].tabs[panes[side].tab].view;
         }
       }
       log('info', 'session-restored', {});
@@ -1787,6 +1942,7 @@
     add(`${L}: save`, () => p.save(false), { hint: 'Ctrl/Cmd+S', enabled: hasText });
     add(`${L}: save as…`, () => p.save(true), { hint: 'file', enabled: hasText });
     add(`${L}: clear`, () => p.clear(), { hint: 'edit', enabled: hasText });
+    for (const it of transformDefs(p)) if (!it.sep) add(`${L}: ${it.label}`, it.run, { hint: 'transform', enabled: p.ok });
     add(`${L}: apply format to raw text`, () => p.applyFormat(), { hint: 'edit', enabled: p.ok });
     add(`${L}: copy raw text`, () => copyText(p.input.value, 'raw text'), { hint: 'copy', enabled: hasText });
     add(`${L}: copy formatted output`, () => { if (p.view !== 'preview') p.setView('preview', true); copyText(p.fmtText, 'formatted output'); }, { hint: 'copy', enabled: p.ok });
@@ -1798,6 +1954,7 @@
     add(`${L}: expand embedded JSON`, () => p.q('[data-act="embedded"]').click(), { hint: 'tree', enabled: p.ok && p.embedded > 0 });
     add(`${L}: new document tab`, () => p.newTab(), { hint: 'tabs' });
     add(`${L}: close document tab`, () => p.closeTab(p.tab), { hint: 'tabs' });
+    add(`${L}: rename document tab`, () => p.renameTab(p.tab), { hint: 'tabs' });
     add(`${L}: next document tab`, () => p.stepTab(1), { hint: 'tabs', enabled: p.tabs.length > 1 });
     add(`${L}: previous document tab`, () => p.stepTab(-1), { hint: 'tabs', enabled: p.tabs.length > 1 });
     add(maxSide === p.side ? `${L}: restore size` : `${L}: maximise`, () => setMax(maxSide === p.side ? null : p.side), { hint: 'layout' });

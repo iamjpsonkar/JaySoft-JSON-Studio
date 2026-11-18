@@ -60,7 +60,7 @@ Every pane opens in Raw so you can paste JSON straight in; loading content never
 
 - **Resize**: drag the divider between the panes (and the one between the panes and the Compare / Validate area). Arrow keys move it when it has focus, double-click resets it. Sizes are remembered.
 - **Maximise**: the ⤢ button gives one pane the whole window; the same button or `Esc` restores it. **Sync scroll** (top bar) scrolls both panes together.
-- **Tabs**: each pane holds several documents. **Open**, a drop or a toolbar hand-off adds a tab when the pane already has content, so nothing is replaced. **+** starts an empty one. Tabs, with their text, survive a reload of the studio tab (session storage); file handles do not.
+- **Tabs**: each pane holds several documents. **Open**, a drop or a toolbar hand-off adds a tab when the pane already has content, so nothing is replaced. **+** starts an empty one. Tabs, with their text, survive a reload of the studio tab (session storage); file handles do not. Every tab remembers its own view, so tab 1 can be in Preview and tab 2 in Raw; switching tabs switches the view with it. New tabs are numbered (`Untitled`, `Untitled 2`, …); **double-click a tab** (or use the palette) to give it a name. Renaming a tab that is linked to a file detaches it from that file after a confirmation, so Save will ask where to save instead of overwriting the original.
 - **Recent**: the files you opened or saved, reopened in a new tab (browser permission is asked again when needed). File handles are kept in this browser's IndexedDB; **Clear recent files** empties the list.
 - **Undo / redo** (Tree toolbar, or `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` in the tree) covers tree edits, Apply format, Repair and Clear, per document. Typing in Raw / Preview keeps the browser's own undo.
 - **Command palette**: `Ctrl/Cmd+K` (or the ⌘K button) lists every action: views, file actions, modes, layout, formats. Type to filter, arrows and Enter to run.
@@ -72,6 +72,20 @@ Line numbers and colours; **Find / replace** (`Ctrl/Cmd+F` or **Find**) with mat
 ### Tree keyboard
 
 Click a row (or focus the tree), then: `↑ ↓ Home End` move, `→` opens or enters, `←` closes or goes to the parent, `Enter` edits a value or folds, `F2` renames a key, `Delete` removes the entry.
+
+### Transform menu
+
+**Transform ▾** (Raw, Preview and Tree toolbars, and the palette) rewrites the pane's document. Each step goes into the undo history (Tree toolbar), the document keeps its own format (JSON, Python or JavaScript) and its own indentation (2, 4 or tab), and a step that would change nothing says so instead of rewriting the text. Transforms need a valid document.
+
+- **Sort keys A → Z / Z → A**: at every depth; natural order (`k2` before `k10`); duplicate keys keep their relative order.
+- **Sort arrays…**: by a field (`price`, `owner.name`, `items[0].id`) or, left blank, by the values themselves; ascending or descending; every array or only the top-level one. Numbers sort numerically, strings in natural order, mixed types as numbers < strings < booleans < null; items without the field go last. Python tuples are positional and are never reordered.
+- **Pretty-print** (2 spaces, 4 spaces, tabs) and **Minify**.
+- **Remove nulls and empty values** (`null`, `""`, `[]`, `{}`; a container emptied by this is removed too; `0` and `false` stay) and **Remove duplicate array items** (deep equality, key order ignored, numbers compared exactly).
+- **Flatten to dotted keys** / **Unflatten**: `{"a": {"b": [1]}}` ⇄ `{"a.b[0]": 1}`, using the same path syntax as the tree's "path" button (odd keys become `["f.g"]`). Unflatten reports keys it had to skip because they clash, and array gaps it filled with `null`.
+- **Stringify** (the document becomes one JSON string) and **Parse a JSON string** (the reverse; also writes back what the loader unwrapped from escaped or quoted text).
+- **Convert to JSON / Python / JavaScript**.
+
+Numbers in sort keys go through JavaScript numbers, so integers beyond 2^53 may tie when sorted (they are still preserved exactly in the text).
 
 ### Export formats (Preview)
 

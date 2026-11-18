@@ -20,6 +20,7 @@ JSON Studio is a fast, private JSON viewer, formatter and diff tool that runs en
 - Exact numbers: big integers and decimals never lose digits
 - Two independent panes, each with Raw / Preview / Tree views (all with line numbers, all editable), and Open / Paste / Save per pane
 - Resizable and maximisable panes, several documents per pane (tabs, recent files), find and replace, undo, command palette (Ctrl/Cmd+K)
+- Transform menu: sort keys, sort arrays by a field, minify, remove nulls / duplicates, flatten / unflatten, stringify, convert to JSON / Python / JS
 - Validate against a JSON Schema; export as YAML, CSV, TypeScript types or JSON Schema
 - Side-by-side compare with tree and text diff: ignore key order, match arrays by key, ignore paths, number tolerance, JSON Patch export
 - JSONPath queries, search, in-tree editing, format as JSON, Python or JavaScript

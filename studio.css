@@ -65,6 +65,8 @@ button:focus-visible, .field:focus-visible { outline: 2px solid var(--accent); o
 body.resizing { user-select: none; }
 #paneRow[data-layout="1"] .vsplit, #paneRow[data-max] .vsplit { display: none; }
 #paneRow[data-max="a"] .docpane[data-pane="b"], #paneRow[data-max="b"] .docpane[data-pane="a"] { display: none; }
+/* the saved split only applies while both panes are visible; a lone pane always fills the row */
+#paneRow[data-layout="1"] .docpane, #paneRow[data-max] .docpane { flex: 1 1 0 !important; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 .btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
 /* document tabs */
@@ -79,6 +81,7 @@ body.resizing { user-select: none; }
 .menu { position: fixed; z-index: 70; min-width: 220px; max-width: 420px; max-height: 50vh; overflow: auto; padding: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
 .menu button { display: block; width: 100%; text-align: left; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .menu button:hover, .menu button:focus-visible { background: var(--accent-soft); outline: none; }
+.menu .menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 .menu .empty-item { padding: 8px 10px; color: var(--muted); }
 .docpane + .docpane { border-left: 1px solid var(--border); }
 .docpane.active .pane-head { box-shadow: inset 0 -2px 0 var(--accent); }
@@ -210,6 +213,14 @@ details.more ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
 .drop-overlay > div { padding: 40px 60px; border: 2px dashed var(--accent); border-radius: 18px; font-size: 20px; font-weight: 600; color: var(--accent); }
 .toast { position: fixed; left: 50%; bottom: 44px; transform: translateX(-50%); z-index: 60; max-width: min(680px, 90vw); padding: 10px 16px; border-radius: 10px; background: var(--text); color: var(--bg); box-shadow: var(--shadow); font-size: 13.5px; }
 .toast.error { background: var(--danger); color: #fff; }
+
+/* ---------- dialog ---------- */
+.modal-overlay { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 55%, transparent); backdrop-filter: blur(2px); }
+.modal { width: min(460px, 92vw); display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+.modal h2 { margin: 0; font-size: 16px; }
+.modal-row { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12.5px; }
+.modal-row .field { font-size: 14px; color: var(--text); padding: 6px 9px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ---------- validate, palette ---------- */
 .v-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }

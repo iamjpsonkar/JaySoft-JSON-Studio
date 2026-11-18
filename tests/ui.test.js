@@ -24,7 +24,7 @@ async function boot({ search = '', session = {}, prefs } = {}) {
   w.chrome = { storage: { session: { get: async (k) => ({ [k]: session[k] }), remove: async (k) => { delete session[k]; } } } };
   w.confirm = () => true;
   if (prefs) w.localStorage.setItem('jsstudio.prefs.v1', JSON.stringify(prefs));
-  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
+  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema', 'transform']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
   w.JSS.setLogLevel('error');
   w.eval(fs.readFileSync(path.join(ROOT, 'studio.js'), 'utf8'));
   await sleep(60);
@@ -784,7 +784,7 @@ async function bootSeeded(session) {
   Object.assign(w, { TextDecoder, TextEncoder, Blob, Response, DecompressionStream });
   Object.defineProperty(w.navigator, 'clipboard', { value: { writeText: async () => {}, readText: async () => '' } });
   w.confirm = () => true;
-  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
+  for (const f of ['ast', 'parser', 'fmt', 'loader', 'diff', 'query', 'textdiff', 'find', 'editing', 'convert', 'schema', 'transform']) w.eval(fs.readFileSync(path.join(ROOT, 'core', `${f}.js`), 'utf8'));
   w.JSS.setLogLevel('error');
   w.eval(fs.readFileSync(path.join(ROOT, 'studio.js'), 'utf8'));
   await sleep(120);
@@ -1103,5 +1103,237 @@ test('tree keyboard: arrows move and fold, Enter edits, F2 renames, Delete remov
   key(t.w, tree, 'Delete');
   await sleep(400);
   assert.ok(!/first/.test(t.a.input.value), 'Delete removes the selected entry');
+  assert.deepEqual(t.errors, []);
+});
+
+test('a lone pane (1 pane layout, or maximised) fills the whole row despite a saved split', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'studio.css'), 'utf8');
+  assert.match(css, /#paneRow\[data-layout="1"\] \.docpane, #paneRow\[data-max\] \.docpane \{ flex: 1 1 0 !important; \}/);
+});
+
+test('every tab keeps its own view: switching tabs switches Raw / Preview / Tree', async () => {
+  const t = await boot();
+  await t.a.type('{"one": 1}');
+  t.a.view('preview');
+  t.a.act('newtab');
+  await sleep(380);
+  assert.deepEqual(t.a.visibleView(), ['raw'], 'a new tab starts in Raw');
+  await t.a.type('{"two": 2}');
+  t.a.view('tree');
+  assert.deepEqual(t.a.visibleView(), ['tree']);
+  t.click(t.a.q('[data-tab="0"]'));
+  await sleep(380);
+  assert.deepEqual(t.a.visibleView(), ['preview'], 'tab 1 is back in Preview');
+  assert.equal(t.a.activeBtn(), 'preview');
+  assert.match(t.a.q('[data-pinput]').value, /"one": 1/);
+  t.click(t.a.q('[data-tab="1"]'));
+  await sleep(380);
+  assert.deepEqual(t.a.visibleView(), ['tree'], 'tab 2 is back in Tree');
+  assert.ok(t.a.rowTexts().includes('"two": 2'));
+  t.b.view('tree');
+  assert.deepEqual(t.a.visibleView(), ['tree'], 'the other pane has its own tabs and views');
+  await sleep(600);
+  const saved = JSON.parse(t.w.sessionStorage.getItem('jsstudio.session.v1'));
+  assert.deepEqual(saved.a.tabs.map((x) => x.view), ['preview', 'tree'], 'views are part of the saved session');
+  const t2 = await bootSeeded(saved);
+  const active = (x) => x.a.q('[data-views] .active').dataset.view;
+  assert.equal(active(t2), 'tree', 'the restored tab opens in its own view');
+  t2.click(t2.a.q('[data-tab="0"]'));
+  await sleep(380);
+  assert.equal(active(t2), 'preview');
+});
+
+test('new tabs are numbered, and a name can be given by double-clicking the tab', async () => {
+  const t = await boot();
+  const names = () => t.a.qa('[data-tabs] .tab').map((x) => x.firstChild.textContent);
+  t.a.act('newtab'); await sleep(380);
+  t.a.act('newtab'); await sleep(380);
+  assert.deepEqual(names(), ['Untitled', 'Untitled 2', 'Untitled 3']);
+  t.click(t.a.q('[data-close="1"]')); await sleep(380);
+  t.a.act('newtab'); await sleep(380);
+  assert.deepEqual(names(), ['Untitled', 'Untitled 3', 'Untitled 2'], 'the lowest free number is reused');
+
+  // rename the current tab
+  const dbl = (el) => el.dispatchEvent(new t.w.MouseEvent('dblclick', { bubbles: true }));
+  const saves = [];
+  t.w.showSaveFilePicker = async (o) => { saves.push(o.suggestedName); throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); };
+  await t.a.type('{"n": 1}');
+  dbl(t.a.q('[data-tab="2"]'));
+  const input = t.a.q('[data-tabs] input.tab-edit');
+  assert.ok(input, 'a name box opens in the tab');
+  input.value = 'orders.json';
+  key(t.w, input, 'Enter');
+  assert.deepEqual(names(), ['Untitled', 'Untitled 3', 'orders.json']);
+  assert.equal(t.a.q('[data-name]').textContent, 'orders.json', 'the pane header shows the new name');
+  t.a.act('save');
+  await sleep(60);
+  assert.deepEqual(saves, ['orders.json'], 'Save suggests the chosen name');
+
+  // Escape cancels, an empty name changes nothing
+  dbl(t.a.q('[data-tab="2"]'));
+  let box = t.a.q('[data-tabs] input.tab-edit');
+  box.value = 'nope'; key(t.w, box, 'Escape');
+  assert.equal(names()[2], 'orders.json');
+  dbl(t.a.q('[data-tab="2"]'));
+  box = t.a.q('[data-tabs] input.tab-edit');
+  box.value = '   '; key(t.w, box, 'Enter');
+  assert.equal(names()[2], 'orders.json');
+  // path separators cannot sneak into a name
+  dbl(t.a.q('[data-tab="2"]'));
+  box = t.a.q('[data-tabs] input.tab-edit');
+  box.value = 'a/b\\c.json'; key(t.w, box, 'Enter');
+  assert.equal(names()[2], 'a-b-c.json');
+
+  // renaming another tab switches to it first
+  dbl(t.a.q('[data-tab="0"]'));
+  box = t.a.q('[data-tabs] input.tab-edit');
+  box.value = 'first'; key(t.w, box, 'Enter');
+  assert.deepEqual(names(), ['first', 'Untitled 3', 'a-b-c.json']);
+  assert.equal(t.a.q('[data-tabs] .tab.active').dataset.tab, '0');
+  // the palette offers it too
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+  t.$('palInput').value = 'rename'; t.$('palInput').dispatchEvent(new t.w.Event('input'));
+  key(t.w, t.$('palInput'), 'Enter');
+  assert.ok(t.a.q('[data-tabs] input.tab-edit'));
+  key(t.w, t.a.q('[data-tabs] input.tab-edit'), 'Escape');
+  assert.deepEqual(t.errors, []);
+});
+
+test('renaming a tab that is linked to a file detaches it (after confirmation): Save no longer overwrites the file', async () => {
+  const t = await boot();
+  const log = [];
+  const h = fakeHandle('real.json', '{"x": 1}', log);
+  t.w.showOpenFilePicker = async () => [h];
+  t.a.act('open');
+  await sleep(400);
+  const picked = [];
+  t.w.showSaveFilePicker = async (o) => { picked.push(o.suggestedName); throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); };
+  const dbl = (el) => el.dispatchEvent(new t.w.MouseEvent('dblclick', { bubbles: true }));
+  t.w.confirm = () => false;
+  dbl(t.a.q('[data-tab="0"]'));
+  let box = t.a.q('[data-tabs] input.tab-edit');
+  box.value = 'copy.json'; key(t.w, box, 'Enter');
+  assert.equal(t.a.q('[data-name]').textContent, 'real.json', 'declining the warning keeps the file link and the name');
+  t.w.confirm = () => true;
+  dbl(t.a.q('[data-tab="0"]'));
+  box = t.a.q('[data-tabs] input.tab-edit');
+  box.value = 'copy.json'; key(t.w, box, 'Enter');
+  assert.equal(t.a.q('[data-name]').textContent, 'copy.json');
+  t.a.act('save');
+  await sleep(80);
+  assert.deepEqual(picked, ['copy.json'], 'Save now asks where, suggesting the new name');
+  assert.deepEqual(log, [], 'the original file was never written');
+  assert.deepEqual(t.errors, []);
+});
+
+// ====================================================================== transforms
+test('Transform menu: sort keys, minify, pretty-print; unchanged text is reported, not rewritten; history can undo', async () => {
+  const t = await boot();
+  const items = () => [...t.w.document.querySelectorAll('.menu button')].map((b) => b.textContent);
+  const pick = async (label) => { t.click([...t.w.document.querySelectorAll('.menu button')].find((b) => b.textContent === label)); await sleep(420); };
+  const open = () => { t.a.act('transform'); };
+  await t.a.type('{"b": 2, "a": {"z": 1, "y": [3, 1, 2]}}');
+  open();
+  assert.deepEqual(items().filter((x) => /^(Sort|Minify|Pretty|Remove|Flatten|Unflatten|Stringify|Parse|Convert)/.test(x)).length, 16, 'the menu lists every transform');
+  assert.equal(t.w.document.querySelectorAll('.menu .menu-sep').length, 3, 'in groups');
+  await pick('Sort keys A → Z');
+  assert.equal(t.a.input.value, '{\n  "a": {\n    "y": [\n      3,\n      1,\n      2\n    ],\n    "z": 1\n  },\n  "b": 2\n}');
+  assert.match(t.$('toast').textContent, /Sort keys: reordered the keys of 2 objects/);
+  open(); await pick('Sort keys A → Z');
+  assert.match(t.$('toast').textContent, /already in that order/, 'nothing is rewritten when nothing changes');
+  open(); await pick('Minify');
+  assert.equal(t.a.input.value, '{"a":{"y":[3,1,2],"z":1},"b":2}');
+  open(); await pick('Minify');
+  assert.match(t.$('toast').textContent, /nothing to change/);
+  open(); await pick('Pretty-print (tabs)');
+  assert.match(t.a.input.value, /^\{\n\t"a": \{\n\t\t"y"/);
+  open(); await pick('Sort keys Z → A');
+  assert.match(t.a.input.value, /^\{\n\t"b": 2,\n\t"a"/, 'keeps the tab indentation it was given');
+  await t.a.type('{"y": 1,\n    "x": 2}');
+  open(); await pick('Sort keys A → Z');
+  assert.equal(t.a.input.value, '{\n    "x": 2,\n    "y": 1\n}', 'and 4 spaces stay 4 spaces');
+  t.a.view('tree');
+  t.a.act('undo'); await sleep(420);
+  assert.equal(t.a.input.value, '{"y": 1,\n    "x": 2}', 'undo returns to the text as it was before the last transform');
+  assert.deepEqual(t.errors, []);
+});
+
+test('Transform: Sort arrays dialog (by field, order, scope), cancel, bad path; other clean-ups', async () => {
+  const t = await boot();
+  const pick = async (label) => { t.a.act('transform'); t.click([...t.w.document.querySelectorAll('.menu button')].find((b) => b.textContent === label)); await sleep(420); };
+  const val = () => JSON.parse(t.a.input.value);
+  await t.a.type('{"items": [{"n": "b", "p": 2}, {"n": "a", "p": 10}, {"n": "c"}], "nums": [3, 1, 2]}');
+  await pick('Sort arrays…');
+  const dlg = () => t.w.document.querySelector('.modal');
+  assert.ok(dlg(), 'a dialog opens');
+  assert.equal(t.w.document.activeElement, dlg().querySelector('input'), 'focus is in the first field');
+  key(t.w, dlg().parentElement, 'Escape');
+  assert.equal(dlg(), null, 'Esc cancels');
+  assert.equal(t.a.input.value, '{"items": [{"n": "b", "p": 2}, {"n": "a", "p": 10}, {"n": "c"}], "nums": [3, 1, 2]}', 'cancelling changes nothing');
+  const fill = async (by, order, scope) => {
+    await pick('Sort arrays…');
+    const [inp, ord, sc] = [dlg().querySelector('input'), ...dlg().querySelectorAll('select')];
+    inp.value = by; ord.value = order; sc.value = scope;
+    dlg().dispatchEvent(new t.w.Event('submit', { cancelable: true }));
+    await sleep(420);
+  };
+  await fill('p', 'desc', 'all');
+  assert.deepEqual(val().items.map((x) => x.n), ['a', 'b', 'c'], 'by p descending (10, 2); the item without p stays last');
+  assert.deepEqual(val().nums, [3, 1, 2], 'arrays of values are untouched when sorting by a field of objects');
+  await fill('', 'asc', 'all');
+  assert.deepEqual(val().nums, [1, 2, 3], 'blank field sorts the values themselves');
+  await fill('n', 'asc', 'top');
+  assert.match(t.$('toast').textContent, /not an array/, 'top-level scope on an object says why nothing happened');
+  await fill('a[', 'asc', 'all');
+  assert.match(t.$('toast').textContent, /not a valid field path/);
+  assert.deepEqual(t.errors, []);
+
+  await t.b.type('{"a": null, "b": "", "c": [1, 1, 2], "d": {"e": {}}, "f.g": 1}');
+  const pickB = async (label) => { t.b.act('transform'); t.click([...t.w.document.querySelectorAll('.menu button')].find((b) => b.textContent === label)); await sleep(420); };
+  await pickB('Remove nulls and empty values');
+  assert.deepEqual(JSON.parse(t.b.input.value), { c: [1, 1, 2], 'f.g': 1 });
+  await pickB('Remove duplicate array items');
+  assert.deepEqual(JSON.parse(t.b.input.value).c, [1, 2]);
+  await pickB('Flatten to dotted keys');
+  assert.deepEqual(JSON.parse(t.b.input.value), { 'c[0]': 1, 'c[1]': 2, '["f.g"]': 1 });
+  await pickB('Unflatten dotted keys');
+  assert.deepEqual(JSON.parse(t.b.input.value), { c: [1, 2], 'f.g': 1 });
+  await pickB('Stringify (escape as a JSON string)');
+  assert.equal(JSON.parse(t.b.input.value), '{"c":[1,2],"f.g":1}');
+  await pickB('Parse a JSON string (unescape)');
+  assert.deepEqual(JSON.parse(t.b.input.value), { c: [1, 2], 'f.g': 1 });
+  await pickB('Convert to Python');
+  await t.b.type("{'t': True, 'n': None, 'b': 1, 'a': 2}");
+  await pickB('Sort keys A → Z');
+  assert.match(t.b.input.value, /^\{\n {2}'a': 2,\n {2}'b': 1,\n {2}'n': None,\n {2}'t': True\n\}$/, 'a Python document stays Python');
+  await pickB('Convert to JSON');
+  assert.match(t.b.input.value, /"n": null/);
+  await pickB('Convert to JavaScript');
+  assert.match(t.b.input.value, /^\{\n {2}a: 2,/);
+  await pickB('Parse a JSON string (unescape)');
+  assert.match(t.$('toast').textContent, /single JSON string/, 'a mismatch is explained, nothing is changed');
+  assert.deepEqual(t.errors, []);
+});
+
+test('transforms need a valid document; the palette offers them for the pane in use', async () => {
+  const t = await boot();
+  assert.equal(t.a.q('[data-act="transform"]').disabled, true, 'nothing to transform in an empty pane');
+  await t.a.type('{"broken": ');
+  assert.equal(t.a.q('[data-act="transform"]').disabled, true, 'nor in an invalid one');
+  await t.a.type('{"b": 1, "a": 2}');
+  assert.equal(t.a.q('[data-act="transform"]').disabled, false);
+  assert.equal(t.qa('[data-act="transform"]').length, 6, 'one button in each of Raw, Preview and Tree, in both panes');
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+  t.$('palInput').value = 'a: sort keys'; t.$('palInput').dispatchEvent(new t.w.Event('input'));
+  assert.deepEqual([...t.w.document.querySelectorAll('#palList li')].map((l) => l.firstChild.textContent), ['A: Sort keys A → Z', 'A: Sort keys Z → A']);
+  key(t.w, t.$('palInput'), 'Enter');
+  await sleep(420);
+  assert.match(t.a.input.value, /^\{\n {2}"a": 2,\n {2}"b": 1\n\}$/);
+  await t.b.type('{"x": ');
+  t.b.input.dispatchEvent(new t.w.Event('focusin', { bubbles: true }));
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+  t.$('palInput').value = 'minify'; t.$('palInput').dispatchEvent(new t.w.Event('input'));
+  assert.equal(t.w.document.querySelectorAll('#palList li:not(.none)').length, 0, 'not offered while the pane has an error');
+  key(t.w, t.$('palInput'), 'Escape');
   assert.deepEqual(t.errors, []);
 });
