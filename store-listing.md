@@ -6,26 +6,21 @@ Copy-paste material for the Developer Dashboard (listing text, screenshots and p
 
 **Name:** JSON Studio
 
-**Summary:** View, format, query and compare JSON, Python dicts and more. Paste stringified JSON, logs, Base64 or a JWT.
+**Summary:** View, format, edit and compare JSON and Python dictionaries in a fast, private tab. Everything runs in your browser.
 
 **Category:** Developer Tools
 
 **Description:**
 
-JSON Studio is a fast, private JSON viewer, formatter and diff tool that runs entirely in your browser.
+JSON Studio is a fast, private JSON viewer, formatter and diff tool that runs entirely in your browser. It opens JSON as a clear, searchable tree and helps you read, edit and compare it. Click the toolbar icon on a JSON page or API response and it opens in a new tab.
 
-- Click the toolbar icon on a JSON page or API response: it opens in a new tab as a searchable tree
-- Paste almost anything: JSON, JSON5, Python dict/list reprs (True/None/tuples/sets/Decimal/datetime), JavaScript objects, Ruby hashes, PHP arrays
-- Unwraps stringified and multi-layer encoded JSON, finds JSON inside log lines and curl or JSON.parse calls, decodes Base64, gzip+Base64, URL-encoding, HTML entities and JWTs
-- Exact numbers: big integers and decimals never lose digits
-- Two independent panes, each with Raw / Preview / Tree views (all with line numbers, all editable), and Open / Paste / Save per pane
-- Resizable and maximisable panes, several documents per pane (tabs, recent files), find and replace, undo, command palette (Ctrl/Cmd+K)
-- Up to four independent panes, a read-only fold view to collapse any block of the preview
-- Transform menu: sort keys, sort arrays by a field, minify, remove nulls / duplicates, flatten / unflatten, stringify, convert to JSON / Python / JS
-- Validate against a JSON Schema; export as YAML, CSV, TypeScript types or JSON Schema
-- Side-by-side compare with tree and text diff: ignore key order, match arrays by key, ignore paths, number tolerance, JSON Patch export
-- JSONPath queries, search, in-tree editing, format as JSON, Python or JavaScript
-- Large files are parsed off the main thread
+It also reads data that is not strict JSON. Paste a Python dictionary, a JavaScript object or a log line that contains a JSON payload, and JSON Studio finds the data, shows how it was read and lets you format it as JSON. If the JSON is stringified or encoded, it unwraps it step by step, so you can see every change it made.
+
+Numbers stay exact: large integers and decimals never lose digits.
+
+Work in up to four independent panes. Each pane has Raw, Preview and Tree views, line numbers, tabs, find and replace, and undo. A built-in compare view shows what was added, removed or changed between two documents, with options to ignore key order or selected paths.
+
+More tools: JSONPath queries, in-tree editing, JSON Schema validation, sorting and cleaning transforms, export to other formats, and a command palette (Ctrl/Cmd+K). Large files are parsed off the main thread so the page stays responsive.
 
 Your data never leaves your computer. No accounts, no analytics, no tracking, and it never executes the data you load.
 
